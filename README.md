@@ -15,6 +15,12 @@ Simple, private website analytics you own. A cookie-free alternative to Google A
 
 ## Deploy in one command
 
+### Render (one click)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/eaglepython/DearMe)
+
+Click the button, sign in to Render, and press **Apply**. Render builds the Docker image, adds a 1 GB disk for your data, and generates an admin password (find it under **Environment** in the service). Your dashboard is live at `https://dear-me-analytics-xxxx.onrender.com` a few minutes later. This uses Render's Starter plan (about $7/month) because free instances have no persistent disk and would lose your stats on every deploy.
+
 ### Docker (any VPS, Synology, Raspberry Pi, your laptop)
 
 ```bash

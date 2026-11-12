@@ -10,6 +10,25 @@ services:
         generateValue: true  # find it under Environment in the Render dashboard, or replace it with your own
       - key: DATA_DIR
         value: /data
+      # Optional. Fill these in the Render dashboard to sell it as a service and send reports.
+      - key: PUBLIC_URL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_GROWTH
+        sync: false
+      - key: STRIPE_PRICE_BUSINESS
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: REPORT_FROM
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
     disk:
       name: analytics-data
       mountPath: /data

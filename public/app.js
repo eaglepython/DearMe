@@ -7,11 +7,14 @@
   const num = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k' : Number(n || 0).toLocaleString());
   const dur = (s) => (s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
   const flag = (cc) => (cc && /^[A-Z]{2}$/.test(cc) ? String.fromCodePoint(...[...cc].map((c) => 127397 + c.charCodeAt(0))) : '🌐');
+  const day = (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 
-  const shareToken = location.pathname.startsWith('/share/') ? location.pathname.split('/')[2] : null;
+  const parts = location.pathname.split('/').filter(Boolean);
+  const shareToken = parts[0] === 'share' ? parts[1] : null;
   const state = {
     sites: [], site: null, period: localGet('period') || '7d', metric: 'visitors', filters: {},
     tabs: { sources: 'sources', pages: 'pages', devices: 'browsers' }, data: null,
+    me: null, config: {}, canManage: false, funnels: [], funnelId: null,
   };
 
   function localGet(k) { try { return localStorage.getItem('dm_' + k); } catch { return null; } }
@@ -19,70 +22,132 @@
 
   async function api(path, opts = {}) {
     const res = await fetch(path, { credentials: 'same-origin', ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } });
-    if (res.status === 401 && !shareToken) { showLogin(); throw new Error('login'); }
+    if (res.status === 401 && !shareToken && !path.startsWith('/api/login')) { showAuth('login'); throw new Error('login'); }
     const ct = res.headers.get('content-type') || '';
     const body = ct.includes('json') ? await res.json() : await res.text();
-    if (!res.ok) throw Object.assign(new Error(body.error || 'Request failed'), { status: res.status });
+    if (!res.ok) throw Object.assign(new Error(body.error || 'Something went wrong'), { status: res.status });
     return body;
   }
+  const post = (path, body, method = 'POST') => api(path, { method, body: JSON.stringify(body || {}) });
 
   // ------------------------------------------------------------ views
+  const VIEWS = ['dash', 'sites', 'settings', 'empty', 'team', 'account', 'admin'];
   function view(id) {
-    for (const s of ['dash', 'sites', 'settings', 'empty']) $('#' + s).classList.toggle('hidden', s !== id);
-    $('#settings-btn').classList.toggle('hidden', !!shareToken || !state.site || id === 'settings');
-    $('#sites-btn').classList.toggle('hidden', !!shareToken);
+    for (const s of VIEWS) $('#' + s).classList.toggle('hidden', s !== id);
+    const shared = !!shareToken;
+    $('#settings-btn').classList.toggle('hidden', shared || !state.site || id === 'settings');
+    for (const b of ['#sites-btn', '#account-btn']) $(b).classList.toggle('hidden', shared);
+    $('#team-btn').classList.toggle('hidden', shared || !state.canManage);
+    $('#admin-btn').classList.toggle('hidden', shared || !state.me?.operator);
     $('#period').classList.toggle('hidden', id !== 'dash');
     $('#live').classList.toggle('hidden', id !== 'dash');
+    $('#site-select').classList.toggle('hidden', !state.sites.length || !['dash', 'settings'].includes(id));
+    $$('.manage-only').forEach((el) => el.classList.toggle('hidden', !state.canManage));
+    window.scrollTo(0, 0);
   }
-  function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); $('#password').focus(); }
+  function go(path) { if (location.pathname !== path) history.pushState(null, '', path); }
+
+  // ------------------------------------------------------------ sign in / up / invite
+  function showAuth(which) {
+    $('#app').classList.add('hidden');
+    $('#auth').classList.remove('hidden');
+    for (const f of ['login', 'signup', 'invite']) $(`#${f}-form`).classList.toggle('hidden', f !== which);
+    $('#to-signup-wrap').classList.toggle('hidden', !state.config.signup);
+    if (which === 'login') { go('/login'); $('#login-email').focus(); }
+    if (which === 'signup') { go('/signup'); $('#su-name').focus(); }
+  }
+  $('#to-signup').addEventListener('click', (e) => { e.preventDefault(); showAuth('signup'); });
+  $('#to-login').addEventListener('click', (e) => { e.preventDefault(); showAuth('login'); });
+  async function afterAuth() { $('#auth').classList.add('hidden'); go('/app'); boot(); }
 
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     $('#login-error').textContent = '';
-    try {
-      await api('/api/login', { method: 'POST', body: JSON.stringify({ password: $('#password').value }) });
-      $('#login').classList.add('hidden');
-      boot();
-    } catch (err) { if (err.message !== 'login') $('#login-error').textContent = err.message; }
+    try { await post('/api/login', { email: $('#login-email').value, password: $('#login-password').value }); afterAuth(); }
+    catch (err) { $('#login-error').textContent = err.message; }
   });
-  $('#logout').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }); location.href = '/'; });
+  $('#signup-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('#signup-error').textContent = '';
+    try {
+      await post('/api/signup', { name: $('#su-name').value, company: $('#su-company').value, email: $('#su-email').value, password: $('#su-password').value });
+      afterAuth();
+    } catch (err) { $('#signup-error').textContent = err.message; }
+  });
+  async function showInvite(token) {
+    showAuth('invite');
+    try {
+      const inv = await api('/api/invite/' + encodeURIComponent(token));
+      $('#invite-title').textContent = `Join ${inv.account}`;
+      $('#invite-note').textContent = `You're joining as ${inv.role === 'admin' ? 'an admin' : 'a viewer'} with ${inv.email}.`;
+    } catch (err) { $('#invite-note').textContent = err.message; $('#invite-form button').disabled = true; }
+    $('#invite-form').onsubmit = async (e) => {
+      e.preventDefault();
+      $('#invite-error').textContent = '';
+      try { await post('/api/invite/' + encodeURIComponent(token), { name: $('#inv-name').value, password: $('#inv-password').value }); afterAuth(); }
+      catch (err) { $('#invite-error').textContent = err.message; }
+    };
+  }
 
   // ------------------------------------------------------------ boot
   async function boot() {
+    try { state.config = await api('/api/config'); } catch {}
+    $('#trial-note').textContent = state.config.billing ? `${state.config.trialDays} days free. No card needed.` : 'Free to use.';
+    const p = location.pathname.split('/').filter(Boolean);
+    if (p[0] === 'invite' && p[1]) return showInvite(p[1]);
     if (shareToken) {
-      try {
-        const me = await api(`/api/me?share=${encodeURIComponent(shareToken)}`);
-        state.sites = me.sites;
-      } catch { document.body.innerHTML = '<div class="center"><p class="muted">This dashboard is no longer shared.</p></div>'; return; }
+      try { state.sites = (await api(`/api/me?share=${encodeURIComponent(shareToken)}`)).sites; }
+      catch { document.body.innerHTML = '<div class="center"><p class="muted">This dashboard is no longer shared.</p></div>'; return; }
     } else {
-      try { await api('/api/me'); } catch { return; }
-      state.sites = (await api('/api/sites')).sites;
+      const meRes = await fetch('/api/me', { credentials: 'same-origin' });
+      if (!meRes.ok) return showAuth(p[0] === 'signup' && state.config.signup ? 'signup' : 'login');
+      state.me = await meRes.json();
+      const s = await api('/api/sites');
+      state.sites = s.sites; state.canManage = s.canManage;
+      renderBanner();
     }
+    $('#auth').classList.add('hidden');
     $('#app').classList.remove('hidden');
     renderSiteSelect();
-    const fromPath = location.pathname.match(/^\/site\/(\d+)/);
-    const want = fromPath ? +fromPath[1] : +localGet('site');
-    const site = state.sites.find((s) => s.id === want) || state.sites[0];
-    if (!site) { view('empty'); return; }
+    if (!shareToken && p[0] === 'team') return showTeam();
+    if (!shareToken && p[0] === 'admin') return showAdmin();
+    if (!shareToken && (p[0] === 'account' || new URLSearchParams(location.search).get('billing'))) return showAccount();
+    const want = p[0] === 'site' ? +p[1] : +localGet('site');
+    const site = state.sites.find((x) => x.id === want) || state.sites[0];
+    if (!site) { view('empty'); $('#empty-add').classList.toggle('hidden', !state.canManage); return; }
     openSite(site.id, true);
+  }
+
+  function renderBanner() {
+    const a = state.me?.account, el = $('#banner');
+    if (!a || !state.config.billing || a.plan === 'operator') return el.classList.add('hidden');
+    let html = '';
+    const days = a.trialEnds ? Math.max(0, Math.ceil((a.trialEnds - Date.now()) / 864e5)) : null;
+    if (a.state === 'expired') html = '<b>Your free trial has ended.</b> Pick a plan to keep counting visitors.';
+    else if (a.state === 'over_limit') html = `<b>You've used ${num(a.usage)} of ${num(a.limit)} pageviews this month.</b> Upgrade so nothing gets dropped.`;
+    else if (a.plan === 'trial') html = `Free trial: <b>${days} day${days === 1 ? '' : 's'} left</b>. ${num(a.usage)} pageviews used this month.`;
+    if (!html) return el.classList.add('hidden');
+    el.innerHTML = `<span>${html}</span>${state.me.user.role === 'owner' ? '<button class="btn small-btn" id="banner-upgrade">See plans</button>' : ''}`;
+    el.className = 'banner' + (a.state === 'expired' || a.state === 'over_limit' ? ' warn' : '');
+    $('#banner-upgrade')?.addEventListener('click', showAccount);
   }
 
   function renderSiteSelect() {
     $('#site-select').innerHTML = state.sites.map((s) => `<option value="${s.id}">${esc(s.domain)}</option>`).join('');
-    $('#site-select').classList.toggle('hidden', !state.sites.length);
     if (state.site) $('#site-select').value = state.site.id;
   }
   $('#site-select').addEventListener('change', (e) => openSite(+e.target.value));
 
   function openSite(id, replace) {
     state.site = state.sites.find((s) => s.id === id);
-    state.filters = {};
+    state.filters = {}; state.funnelId = null;
     localSet('site', id);
     if (!shareToken) history[replace ? 'replaceState' : 'pushState'](null, '', `/site/${id}`);
     $('#site-select').value = id;
     $('#period').value = state.period;
     view('dash');
     load();
+    loadInsights();
     connectLive();
   }
 
@@ -90,6 +155,9 @@
   $('#sites-btn').addEventListener('click', showSites);
   $('#empty-add').addEventListener('click', showSites);
   $('#settings-btn').addEventListener('click', showSettings);
+  $('#team-btn').addEventListener('click', showTeam);
+  $('#account-btn').addEventListener('click', showAccount);
+  $('#admin-btn').addEventListener('click', showAdmin);
   $('#settings-back').addEventListener('click', () => openSite(state.site.id));
   window.addEventListener('popstate', () => boot());
 
@@ -127,6 +195,7 @@
     if (ticket !== loading) return;
     state.data = data;
     render();
+    loadFunnels();
   }
 
   let es, refreshTimer;
@@ -150,6 +219,7 @@
   function render() {
     const d = state.data;
     $('#live span').textContent = d.realtime;
+    $('#imported-note').classList.toggle('hidden', !d.imported);
 
     $('#filters').innerHTML = Object.entries(state.filters).map(([k, v]) => `<button class="chip" data-k="${k}">${k[0].toUpperCase() + k.slice(1)} is <b>${esc(v)}</b> ✕</button>`).join('');
     $$('#filters .chip').forEach((c) => c.addEventListener('click', () => { delete state.filters[c.dataset.k]; load(); }));
@@ -187,7 +257,7 @@
       ${rows.length ? `<div class="cols"><span>${tabs.find((t) => t[0] === active)[1]}</span><span>${valueLabel}</span></div>
       <div class="rows">${rows.map((r) => {
         const label = key === 'countries' ? `<span class="flag">${flag(r.key)}</span>${esc(r.key === '(none)' ? 'Unknown' : r.name || r.key)}` : esc(r.key === '(none)' ? 'Not set' : r.key);
-        const pct = Math.round((r.visitors / total) * 100);
+        const pct = Math.min(100, Math.round((r.visitors / total) * 100));
         return `<button class="r" data-dim="${dim}" data-val="${esc(r.key ?? '(none)')}" title="Filter by ${esc(r.key)}">
           <span class="fill" style="width:${(r.visitors / max) * 100}%"></span>
           <span class="k">${label}</span><span class="v">${num(r.visitors)}<small>${key === 'events' ? num(r.hits) + '×' : pct + '%'}</small></span></button>`;
@@ -263,30 +333,117 @@
     return 10 * p;
   }
 
+
+  // ------------------------------------------------------------ insights
+  async function loadInsights() {
+    const el = $('#insights');
+    const siteId = state.site.id;
+    el.classList.remove('hidden');
+    el.innerHTML = '<div class="ph"><h2>✦ This week, in plain English</h2></div><p class="muted small">Reading your numbers…</p>';
+    try {
+      const q = shareToken ? `share=${encodeURIComponent(shareToken)}` : `site=${siteId}`;
+      const r = await api('/api/insights?' + q);
+      if (state.site.id !== siteId) return;
+      el.innerHTML = `<div class="ph"><h2>✦ This week, in plain English</h2>${r.summary ? '<span class="pill">AI summary</span>' : ''}</div>
+        ${r.summary ? `<p class="ai">${esc(r.summary)}</p>` : ''}
+        <ul class="bullets">${r.bullets.map((b) => `<li class="${b.tone}">${esc(b.text)}</li>`).join('')}</ul>
+        ${!r.ai && state.me?.operator ? '<p class="muted small">Tip: set ANTHROPIC_API_KEY on the server to add an AI-written summary with advice.</p>' : ''}`;
+    } catch { el.classList.add('hidden'); }
+  }
+
+  // ------------------------------------------------------------ funnels
+  async function loadFunnels() {
+    const el = $('#funnels');
+    if (shareToken) { el.classList.add('hidden'); return; }
+    try { state.funnels = (await api(`/api/sites/${state.site.id}/funnels`)).funnels; } catch { state.funnels = []; }
+    if (!state.funnels.find((f) => f.id === state.funnelId)) state.funnelId = state.funnels[0]?.id || null;
+    const head = `<div class="ph"><h2>Funnels</h2><div class="row gap">
+        ${state.funnels.length ? `<select id="funnel-select">${state.funnels.map((f) => `<option value="${f.id}" ${f.id === state.funnelId ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>` : ''}
+        ${state.canManage ? '<button class="btn small-btn" id="funnel-new">+ New funnel</button>' : ''}</div></div>`;
+    if (!state.funnelId) {
+      el.innerHTML = head + `<div class="none">See where visitors drop off on the way to a signup or purchase.${state.canManage ? '<br>Click <b>+ New funnel</b> to set one up, for example Home → Pricing → Signup.' : ''}</div>`;
+    } else {
+      const { from, to } = range();
+      const f = await api(`/api/funnel?site=${state.site.id}&id=${state.funnelId}&from=${from}&to=${to}`);
+      const max = Math.max(1, f.steps[0].visits);
+      const last = f.steps.at(-1);
+      el.innerHTML = head + `<p class="muted small">${num(f.steps[0].visits)} visits started this funnel; <b>${last.conversion}%</b> made it to the end.</p>
+        <div class="funnel">${f.steps.map((s, i) => `
+          <div class="fstep">
+            <div class="fbar"><i style="height:${Math.max(2, (s.visits / max) * 100)}%"></i></div>
+            <div class="fnum">${num(s.visits)}</div>
+            <div class="fpct">${s.conversion}%</div>
+            <div class="flabel">${i + 1}. ${s.type === 'event' ? '⚑ ' : ''}${esc(s.value)}</div>
+            ${i ? `<div class="fdrop">−${num(s.dropoff)} dropped (${s.dropoffRate}%)</div>` : '<div class="fdrop">&nbsp;</div>'}
+          </div>`).join('')}</div>
+        ${state.canManage ? '<button class="link small" id="funnel-del">Delete this funnel</button>' : ''}`;
+    }
+    $('#funnel-select')?.addEventListener('change', (e) => { state.funnelId = +e.target.value; loadFunnels(); });
+    $('#funnel-new')?.addEventListener('click', funnelForm);
+    $('#funnel-del')?.addEventListener('click', async () => {
+      await api(`/api/sites/${state.site.id}/funnels/${state.funnelId}`, { method: 'DELETE' });
+      state.funnelId = null; loadFunnels();
+    });
+  }
+  function funnelForm() {
+    const el = $('#funnels');
+    const pages = (state.data?.pages || []).map((p) => p.key);
+    const goals = (state.data?.events || []).map((g) => g.key);
+    const stepRow = (type = 'page', value = '') => `<div class="row gap fs-row">
+        <select class="fs-type"><option value="page" ${type === 'page' ? 'selected' : ''}>Visits page</option><option value="event" ${type === 'event' ? 'selected' : ''}>Completes goal</option></select>
+        <input class="fs-value" list="${type === 'event' ? 'dl-goals' : 'dl-pages'}" value="${esc(value)}" placeholder="${type === 'event' ? 'Signup' : '/pricing  (use * for any, like /blog/*)'}">
+        <button type="button" class="icon-btn fs-del" aria-label="Remove step">✕</button></div>`;
+    el.innerHTML = `<div class="ph"><h2>New funnel</h2></div>
+      <datalist id="dl-pages">${pages.map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
+      <datalist id="dl-goals">${goals.map((g) => `<option value="${esc(g)}">`).join('')}</datalist>
+      <input id="fn-name" placeholder="Name, e.g. Signup flow">
+      <div id="fn-steps">${stepRow('page', '/')}${stepRow('page', pages.find((p) => p !== '/') || '/pricing')}${goals[0] ? stepRow('event', goals[0]) : ''}</div>
+      <div class="row gap wrap"><button type="button" class="btn ghost" id="fn-add">+ Add step</button><div class="grow"></div>
+        <button type="button" class="btn ghost" id="fn-cancel">Cancel</button><button type="button" class="btn primary" id="fn-save">Save funnel</button></div>
+      <p class="error" id="fn-error"></p>`;
+    const bind = () => {
+      $$('.fs-del', el).forEach((b) => (b.onclick = () => { if ($$('.fs-row', el).length > 2) b.closest('.fs-row').remove(); }));
+      $$('.fs-type', el).forEach((s) => (s.onchange = () => { const i = s.nextElementSibling; i.setAttribute('list', s.value === 'event' ? 'dl-goals' : 'dl-pages'); i.placeholder = s.value === 'event' ? 'Signup' : '/pricing'; }));
+    };
+    bind();
+    $('#fn-add').onclick = () => { if ($$('.fs-row', el).length < 8) { $('#fn-steps').insertAdjacentHTML('beforeend', stepRow()); bind(); } };
+    $('#fn-cancel').onclick = loadFunnels;
+    $('#fn-save').onclick = async () => {
+      const steps = $$('.fs-row', el).map((r) => ({ type: $('.fs-type', r).value, value: $('.fs-value', r).value.trim() }));
+      try {
+        const r = await post(`/api/sites/${state.site.id}/funnels`, { name: $('#fn-name').value, steps });
+        state.funnelId = r.id; loadFunnels();
+      } catch (err) { $('#fn-error').textContent = err.message; }
+    };
+  }
+
   // ------------------------------------------------------------ sites
   async function showSites() {
     view('sites');
-    history.pushState(null, '', '/');
-    state.sites = (await api('/api/sites')).sites;
+    go('/app/sites');
+    const s = await api('/api/sites');
+    state.sites = s.sites; state.canManage = s.canManage;
     renderSiteSelect();
-    $('#site-list').innerHTML = state.sites.map((s) => `<div class="site-row" data-id="${s.id}">
-      <span class="dot ${s.lastSeen && Date.now() - s.lastSeen < 864e5 ? 'on' : ''}"></span>
-      <span class="d">${esc(s.domain)}</span>
-      <span class="n">${num(s.visitors24h)} <span class="muted">visitors · 24h</span></span></div>`).join('') || '<p class="muted">No websites yet.</p>';
+    $('#add-site').classList.toggle('hidden', !state.canManage);
+    const lim = state.me?.account?.siteLimit;
+    $('#site-list').innerHTML = (state.sites.map((x) => `<div class="site-row" data-id="${x.id}">
+      <span class="dot ${x.lastSeen && Date.now() - x.lastSeen < 864e5 ? 'on' : ''}"></span>
+      <span class="d">${esc(x.domain)}</span>
+      <span class="n">${num(x.visitors24h)} <span class="muted">visitors · 24h</span></span></div>`).join('') || '<p class="muted">No websites yet.</p>')
+      + (lim ? `<p class="muted small">${state.sites.length} of ${lim} websites on your plan.</p>` : '');
     $$('.site-row').forEach((r) => r.addEventListener('click', () => openSite(+r.dataset.id)));
-    $('#new-domain').focus();
   }
   $('#add-site').addEventListener('submit', async (e) => {
     e.preventDefault();
     $('#add-error').textContent = '';
     try {
-      const site = await api('/api/sites', { method: 'POST', body: JSON.stringify({ domain: $('#new-domain').value }) });
+      const site = await post('/api/sites', { domain: $('#new-domain').value });
       $('#new-domain').value = '';
       state.sites = (await api('/api/sites')).sites;
       renderSiteSelect();
-      state.site = state.sites.find((s) => s.id === site.id);
+      state.site = state.sites.find((x) => x.id === site.id);
       showSettings();
-    } catch (err) { $('#add-error').textContent = err.message; }
+    } catch (err) { $('#add-error').innerHTML = esc(err.message) + (err.status === 402 ? ' <a href="#" id="add-upgrade">See plans</a>' : ''); $('#add-upgrade')?.addEventListener('click', (ev) => { ev.preventDefault(); showAccount(); }); }
   });
 
   // ------------------------------------------------------------ settings
@@ -295,10 +452,15 @@
     view('settings');
     $('#site-select').value = s.id;
     $('#settings-title').textContent = s.domain;
-    const tag = `<script defer data-domain="${s.domain}" src="${location.origin}/script.js"></script>`;
-    $('#snippet').textContent = tag;
+    $('#snippet').textContent = `<script defer data-domain="${s.domain}" src="${location.origin}/script.js"></script>`;
     $('#share-toggle').checked = !!s.share_token;
+    $('#report-emails').value = (s.report_emails || '').split(',').filter(Boolean).join(', ');
+    $('#report-preview').href = `/api/sites/${s.id}/report/preview`;
+    $('#report-send').classList.toggle('hidden', !state.config.email);
+    $('#report-msg').textContent = state.config.email ? '' : 'Email sending is not set up on this server yet (RESEND_API_KEY). You can still preview the report.';
+    $('#import-msg').textContent = '';
     renderShare();
+    if (state.canManage) loadImports();
   }
   function renderShare() {
     const t = state.site.share_token;
@@ -309,9 +471,21 @@
     setTimeout(() => { $('#copy-snippet').textContent = 'Copy snippet'; }, 2000);
   });
   $('#share-toggle').addEventListener('change', async (e) => {
-    const r = await api(`/api/sites/${state.site.id}/share`, { method: 'POST', body: JSON.stringify({ on: e.target.checked }) });
+    const r = await post(`/api/sites/${state.site.id}/share`, { on: e.target.checked });
     state.site.share_token = r.share_token;
     renderShare();
+  });
+  $('#report-save').addEventListener('click', async () => {
+    try {
+      const r = await post(`/api/sites/${state.site.id}/report`, { emails: $('#report-emails').value }, 'PUT');
+      state.site.report_emails = r.emails.join(',');
+      $('#report-msg').textContent = r.emails.length ? `Saved. ${r.emails.length} ${r.emails.length === 1 ? 'person gets' : 'people get'} the report every Monday.` : 'Saved. Nobody gets the weekly report.';
+    } catch (err) { $('#report-msg').textContent = err.message; }
+  });
+  $('#report-send').addEventListener('click', async () => {
+    $('#report-msg').textContent = 'Sending…';
+    try { const r = await post(`/api/sites/${state.site.id}/report/send`); $('#report-msg').textContent = `Sent to ${r.sent} ${r.sent === 1 ? 'person' : 'people'}.`; }
+    catch (err) { $('#report-msg').textContent = err.message; }
   });
   $('#export-btn').addEventListener('click', () => { location.href = '/api/export?' + query(); });
   let armed = false;
@@ -322,6 +496,118 @@
     state.site = null;
     showSites();
   });
+
+  // Google Analytics import
+  const DIM_NAMES = { date: 'Visitors by day', page: 'Pages', source: 'Traffic sources', country: 'Countries', browser: 'Browsers', os: 'Operating systems', device: 'Devices', event: 'Events' };
+  async function loadImports() {
+    const { imports } = await api(`/api/sites/${state.site.id}/imports`);
+    $('#import-list').innerHTML = imports.map((i) => `<div class="imp-row"><span><b>${DIM_NAMES[i.dim] || i.dim}</b> · ${esc(i.start_day)} to ${esc(i.end_day)} · ${num(i.rows)} rows <span class="muted small">(${esc(i.filename)})</span></span>
+      <button class="link small" data-id="${i.id}">Remove</button></div>`).join('');
+    $$('#import-list [data-id]').forEach((b) => (b.onclick = async () => { await api(`/api/sites/${state.site.id}/imports/${b.dataset.id}`, { method: 'DELETE' }); loadImports(); }));
+  }
+  async function importFiles(files) {
+    const msgs = [];
+    for (const f of files) {
+      try {
+        const r = await post(`/api/sites/${state.site.id}/imports`, { filename: f.name, csv: await f.text() });
+        msgs.push(`✓ ${f.name}: ${DIM_NAMES[r.dim]}, ${r.start} to ${r.end}, ${r.rows} rows`);
+      } catch (err) { msgs.push(`✕ ${f.name}: ${err.message}`); }
+    }
+    $('#import-msg').innerHTML = msgs.map(esc).join('<br>');
+    loadImports();
+  }
+  $('#import-file').addEventListener('change', (e) => { importFiles([...e.target.files]); e.target.value = ''; });
+  const drop = $('#drop');
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); importFiles([...e.dataTransfer.files]); });
+
+  // ------------------------------------------------------------ team
+  async function showTeam() {
+    view('team');
+    go('/team');
+    const t = await api('/api/team');
+    const myId = state.me.user.id, iAmOwner = state.me.user.role === 'owner';
+    $('#team-list').innerHTML = `<h2>People</h2>` + t.users.map((u) => `<div class="member">
+        <div><b>${esc(u.name || u.email)}</b>${u.id === myId ? ' <span class="muted small">(you)</span>' : ''}<div class="muted small">${esc(u.email)}</div></div>
+        <select data-role="${u.id}" ${u.id === myId || (u.role === 'owner' && !iAmOwner) ? 'disabled' : ''}>
+          ${['owner', 'admin', 'viewer'].map((r) => `<option value="${r}" ${u.role === r ? 'selected' : ''} ${r === 'owner' && !iAmOwner ? 'disabled' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`).join('')}
+        </select>
+        ${u.id === myId ? '<span></span>' : `<button class="link small danger-text" data-remove="${u.id}">Remove</button>`}
+      </div>`).join('') + (state.me.operator && !t.users.length ? '<p class="muted">Only you so far. Invite people below.</p>' : '')
+      + (t.invites.length ? `<h2 style="margin-top:18px">Pending invites</h2>` + t.invites.map((i) => `<div class="member"><div>${esc(i.email)}<div class="muted small">${i.role} · expires ${day(i.expires)}</div></div>
+          <button class="link small copy-inv" data-link="${location.origin}/invite/${i.token}">Copy link</button>
+          <button class="link small danger-text" data-revoke="${i.token}">Cancel</button></div>`).join('') : '');
+    $$('[data-role]').forEach((s) => (s.onchange = async () => { try { await post(`/api/team/users/${s.dataset.role}`, { role: s.value }, 'PATCH'); } catch (err) { alertMsg(err.message); } showTeam(); }));
+    $$('[data-remove]').forEach((b) => (b.onclick = async () => { try { await api(`/api/team/users/${b.dataset.remove}`, { method: 'DELETE' }); } catch (err) { alertMsg(err.message); } showTeam(); }));
+    $$('[data-revoke]').forEach((b) => (b.onclick = async () => { await api(`/api/team/invites/${b.dataset.revoke}`, { method: 'DELETE' }); showTeam(); }));
+    $$('.copy-inv').forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.link); b.textContent = 'Copied ✓'; } catch { b.textContent = b.dataset.link; } }));
+  }
+  function alertMsg(m) { $('#invite-msg').textContent = m; }
+  $('#invite-new').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await post('/api/team/invite', { email: $('#invite-email').value, role: $('#invite-role').value });
+      $('#invite-msg').innerHTML = (r.emailed ? 'Invite emailed. ' : 'Send them this link: ') + `<a href="${esc(r.link)}">${esc(r.link)}</a>`;
+      $('#invite-email').value = '';
+      showTeam();
+    } catch (err) { $('#invite-msg').textContent = err.message; }
+  });
+
+  // ------------------------------------------------------------ account and billing
+  async function showAccount() {
+    view('account');
+    go('/account');
+    state.me = await api('/api/me');
+    renderBanner();
+    const a = state.me.account, isOwner = state.me.user.role === 'owner';
+    const status = new URLSearchParams(location.search).get('billing');
+    $('#account-title').textContent = a.name;
+    const pct = a.limit ? Math.min(100, Math.round((a.usage / a.limit) * 100)) : 0;
+    $('#plan-panel').innerHTML = `
+      ${status === 'success' ? '<p class="ok">Thank you! Your subscription is active.</p>' : ''}
+      <div class="ph"><h2>${esc(a.planName)} plan</h2>${a.trialEnds ? `<span class="pill">Trial ends ${day(a.trialEnds)}</span>` : ''}</div>
+      <p class="muted">${num(a.usage)} pageviews this month${a.limit ? ` of ${num(a.limit)}` : ''}${a.siteLimit ? ` · up to ${a.siteLimit} websites` : ''}.</p>
+      ${a.limit ? `<div class="meter"><i style="width:${pct}%" class="${pct >= 100 ? 'over' : ''}"></i></div>` : ''}
+      <p class="muted small">Signed in as ${esc(state.me.user.email)} (${state.me.user.role}).</p>
+      ${a.hasBilling && isOwner ? '<button class="btn" id="portal-btn">Manage billing and invoices</button>' : ''}`;
+    $('#portal-btn')?.addEventListener('click', async () => { try { location.href = (await post('/api/billing/portal')).url; } catch (err) { $('#plan-panel').insertAdjacentHTML('beforeend', `<p class="error">${esc(err.message)}</p>`); } });
+    const showPlans = state.config.billing && a.plan !== 'operator';
+    $('#plans').classList.toggle('hidden', !showPlans);
+    if (showPlans) {
+      $('#plans').innerHTML = state.config.plans.map((p) => `<div class="plan ${a.plan === p.id ? 'current' : ''}">
+          <h3>${p.name}</h3><div class="price">$${p.price}<span>/month</span></div>
+          <ul><li>${num(p.pageviews)} pageviews a month</li><li>${p.sites} websites</li><li>Funnels, goals, AI insights</li><li>Weekly email reports</li><li>Unlimited team members</li></ul>
+          ${a.plan === p.id ? '<button class="btn" disabled>Current plan</button>' : isOwner ? `<button class="btn primary" data-plan="${p.id}">${a.hasBilling ? 'Switch' : 'Choose'} ${p.name}</button>` : '<p class="muted small">Ask the account owner to upgrade.</p>'}
+        </div>`).join('');
+      $$('[data-plan]').forEach((b) => (b.onclick = async () => {
+        b.disabled = true; b.textContent = 'Opening checkout…';
+        try { location.href = a.hasBilling ? (await post('/api/billing/portal')).url : (await post('/api/billing/checkout', { plan: b.dataset.plan })).url; }
+        catch (err) { b.disabled = false; b.textContent = err.message; }
+      }));
+    }
+    $('#password-form').classList.toggle('hidden', state.me.operator);
+  }
+  $('#password-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try { await post('/api/account/password', { current: $('#pw-current').value, password: $('#pw-new').value }); $('#pw-msg').textContent = 'Password updated.'; e.target.reset(); }
+    catch (err) { $('#pw-msg').textContent = err.message; }
+  });
+  $('#logout').addEventListener('click', async () => { await post('/api/logout'); location.href = '/login'; });
+
+  // ------------------------------------------------------------ operator
+  async function showAdmin() {
+    view('admin');
+    go('/admin');
+    const r = await api('/api/admin/accounts');
+    $('#admin-kpis').innerHTML = [['Monthly revenue', '$' + num(r.mrr)], ['Paying customers', r.paying], ['On free trial', r.trials], ['All accounts', r.accounts.length]]
+      .map(([l, v]) => `<div class="kpi"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
+    $('#admin-list').innerHTML = r.accounts.length ? `<table class="tbl"><thead><tr><th>Customer</th><th>Plan</th><th>Pageviews this month</th><th>Sites</th><th>People</th><th>Joined</th></tr></thead><tbody>
+      ${r.accounts.map((a) => `<tr><td><b>${esc(a.name)}</b><div class="muted small">${esc(a.owner || '')}</div></td>
+        <td>${esc(a.planName)}${a.state === 'expired' ? ' <span class="tag bad">expired</span>' : a.state === 'over_limit' ? ' <span class="tag bad">over limit</span>' : a.mrr ? ` <span class="tag good">$${a.mrr}/mo</span>` : ''}</td>
+        <td>${num(a.usage)}${a.limit ? ` / ${num(a.limit)}` : ''}</td><td>${a.sites}</td><td>${a.users}</td><td>${day(a.created)}</td></tr>`).join('')}
+      </tbody></table>` : `<p class="muted">No customers yet. ${state.config.signup ? `Share <a href="${location.origin}/">${location.origin}</a> to get your first sign-ups.` : 'Turn on sign-ups with ALLOW_SIGNUP=true.'}</p>`;
+  }
 
   boot();
 })();

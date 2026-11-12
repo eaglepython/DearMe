@@ -1,0 +1,14 @@
+{
+  "name": "dear-me-analytics",
+  "version": "1.0.0",
+  "description": "Privacy-first, cookie-free website analytics. One file, zero dependencies.",
+  "main": "server.js",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node scripts/demo-data.js",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dear Me Analytics</title>
+  <meta name="description" content="Privacy-first, cookie-free website analytics.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- login -->
+  <div id="login" class="center hidden">
+    <form id="login-form" class="login-card">
+      <div class="logo"><span class="mark"></span>Dear Me <small>Analytics</small></div>
+      <p class="muted">Simple, private analytics you own.</p>
+      <input id="password" type="password" placeholder="Admin password" autocomplete="current-password" required>
+      <button class="btn primary" type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- app -->
+  <div id="app" class="hidden">
+    <header class="bar">
+      <div class="logo"><span class="mark"></span>Dear Me</div>
+      <select id="site-select" aria-label="Website"></select>
+      <div id="live" class="live" title="Visitors in the last 5 minutes"><i></i><span>0</span> online</div>
+      <div class="grow"></div>
+      <select id="period" aria-label="Period">
+        <option value="today">Today</option>
+        <option value="yesterday">Yesterday</option>
+        <option value="7d" selected>Last 7 days</option>
+        <option value="30d">Last 30 days</option>
+        <option value="month">This month</option>
+        <option value="90d">Last 90 days</option>
+        <option value="12mo">Last 12 months</option>
+      </select>
+      <button id="settings-btn" class="icon-btn" title="Site settings" aria-label="Site settings">⚙</button>
+      <button id="sites-btn" class="icon-btn" title="All sites" aria-label="All sites">▦</button>
+    </header>
+
+    <main>
+      <!-- dashboard -->
+      <section id="dash" class="hidden">
+        <div id="filters" class="filters"></div>
+        <div id="kpis" class="kpis"></div>
+        <div class="panel chart-panel">
+          <div id="chart"></div>
+          <div id="tooltip" class="tooltip hidden"></div>
+        </div>
+        <div class="grid">
+          <div class="panel" data-panel="sources"></div>
+          <div class="panel" data-panel="pages"></div>
+          <div class="panel" data-panel="countries"></div>
+          <div class="panel" data-panel="devices"></div>
+          <div class="panel wide" data-panel="events"></div>
+        </div>
+        <p class="foot muted">No cookies. No personal data. Visitors are counted with a hash that resets every day.</p>
+      </section>
+
+      <!-- sites -->
+      <section id="sites" class="hidden">
+        <h1>Your websites</h1>
+        <div id="site-list"></div>
+        <form id="add-site" class="panel add">
+          <h2>Add a website</h2>
+          <div class="row">
+            <input id="new-domain" placeholder="example.com" required>
+            <button class="btn primary">Add</button>
+          </div>
+          <p id="add-error" class="error"></p>
+        </form>
+        <button id="logout" class="btn ghost">Sign out</button>
+      </section>
+
+      <!-- site settings -->
+      <section id="settings" class="hidden">
+        <button class="link" id="settings-back">‹ Back to dashboard</button>
+        <h1 id="settings-title"></h1>
+        <div class="panel">
+          <h2>1. Add this to your website</h2>
+          <p class="muted">Paste it in the <code>&lt;head&gt;</code> of every page. It is under 2 KB and does not slow your site.</p>
+          <pre id="snippet" class="snippet"></pre>
+          <button class="btn" id="copy-snippet">Copy snippet</button>
+        </div>
+        <div class="panel">
+          <h2>2. Track goals (optional)</h2>
+          <p class="muted">Count signups, purchases, downloads. They show up under Goals.</p>
+          <pre class="snippet">&lt;script&gt;window.dearme = window.dearme || function () { (dearme.q = dearme.q || []).push(arguments) }&lt;/script&gt;
+
+&lt;button onclick="dearme('Signup', { plan: 'pro' })"&gt;Sign up&lt;/button&gt;</pre>
+          <p class="muted small">Add <code>data-outbound</code> to the script tag to count clicks on links to other sites.</p>
+        </div>
+        <div class="panel">
+          <h2>Share a read-only dashboard</h2>
+          <p class="muted">Anyone with the link can see this site's stats. Nobody can change anything.</p>
+          <label class="switch"><input type="checkbox" id="share-toggle"> <span>Public link</span></label>
+          <div id="share-link" class="share-link"></div>
+        </div>
+        <div class="panel">
+          <h2>Your data</h2>
+          <p class="muted">Download every event for the selected period as a spreadsheet.</p>
+          <button class="btn" id="export-btn">Export CSV</button>
+        </div>
+        <div class="panel danger">
+          <h2>Delete this website</h2>
+          <p class="muted">Removes the site and all of its stats. This cannot be undone.</p>
+          <button class="btn danger" id="delete-btn">Delete site</button>
+        </div>
+      </section>
+
+      <section id="empty" class="hidden center-block">
+        <h1>Welcome to Dear Me Analytics</h1>
+        <p class="muted">Add your first website to start counting visitors, without cookies or creepy tracking.</p>
+        <button class="btn primary" id="empty-add">Add a website</button>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

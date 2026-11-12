@@ -1,0 +1,13 @@
+services:
+  analytics:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      # RETENTION_DAYS: 395
+    volumes:
+      - analytics-data:/data
+volumes:
+  analytics-data:

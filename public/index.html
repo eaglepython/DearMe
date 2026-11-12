@@ -9,21 +9,45 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <!-- login -->
-  <div id="login" class="center hidden">
+  <!-- sign in / sign up / accept invite -->
+  <div id="auth" class="center hidden">
     <form id="login-form" class="login-card">
-      <div class="logo"><span class="mark"></span>Dear Me <small>Analytics</small></div>
-      <p class="muted">Simple, private analytics you own.</p>
-      <input id="password" type="password" placeholder="Admin password" autocomplete="current-password" required>
+      <a class="logo" href="/"><span class="mark"></span>Dear Me <small>Analytics</small></a>
+      <h1>Sign in</h1>
+      <input id="login-email" type="email" placeholder="Email" autocomplete="username">
+      <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" required>
       <button class="btn primary" type="submit">Sign in</button>
-      <p id="login-error" class="error"></p>
+      <p class="error" id="login-error"></p>
+      <p class="muted small" id="to-signup-wrap">New here? <a href="/signup" id="to-signup">Start your free trial</a></p>
+      <p class="muted small">Server owner? Leave the email empty and use your admin password.</p>
+    </form>
+    <form id="signup-form" class="login-card hidden">
+      <a class="logo" href="/"><span class="mark"></span>Dear Me <small>Analytics</small></a>
+      <h1>Start your free trial</h1>
+      <p class="muted" id="trial-note">No card needed.</p>
+      <input id="su-name" placeholder="Your name" autocomplete="name">
+      <input id="su-company" placeholder="Company or project (optional)" autocomplete="organization">
+      <input id="su-email" type="email" placeholder="Work email" autocomplete="email" required>
+      <input id="su-password" type="password" placeholder="Password (8+ characters)" autocomplete="new-password" minlength="8" required>
+      <button class="btn primary" type="submit">Create account</button>
+      <p class="error" id="signup-error"></p>
+      <p class="muted small">Already have an account? <a href="/login" id="to-login">Sign in</a></p>
+    </form>
+    <form id="invite-form" class="login-card hidden">
+      <a class="logo" href="/"><span class="mark"></span>Dear Me <small>Analytics</small></a>
+      <h1 id="invite-title">Join your team</h1>
+      <p class="muted" id="invite-note"></p>
+      <input id="inv-name" placeholder="Your name" autocomplete="name">
+      <input id="inv-password" type="password" placeholder="Choose a password (8+ characters)" autocomplete="new-password" minlength="8" required>
+      <button class="btn primary" type="submit">Join</button>
+      <p class="error" id="invite-error"></p>
     </form>
   </div>
 
   <!-- app -->
   <div id="app" class="hidden">
     <header class="bar">
-      <div class="logo"><span class="mark"></span>Dear Me</div>
+      <a class="logo" href="/app"><span class="mark"></span>Dear Me</a>
       <select id="site-select" aria-label="Website"></select>
       <div id="live" class="live" title="Visitors in the last 5 minutes"><i></i><span>0</span> online</div>
       <div class="grow"></div>
@@ -36,25 +60,34 @@
         <option value="90d">Last 90 days</option>
         <option value="12mo">Last 12 months</option>
       </select>
-      <button id="settings-btn" class="icon-btn" title="Site settings" aria-label="Site settings">⚙</button>
-      <button id="sites-btn" class="icon-btn" title="All sites" aria-label="All sites">▦</button>
+      <nav class="nav">
+        <button id="settings-btn" class="icon-btn" title="Site settings" aria-label="Site settings">⚙</button>
+        <button id="sites-btn" class="icon-btn" title="All websites" aria-label="All websites">▦</button>
+        <button id="team-btn" class="icon-btn" title="Team" aria-label="Team">👥</button>
+        <button id="account-btn" class="icon-btn" title="Plan and account" aria-label="Plan and account">◉</button>
+        <button id="admin-btn" class="icon-btn hidden" title="Customers (operator)" aria-label="Customers">★</button>
+      </nav>
     </header>
+    <div id="banner" class="banner hidden"></div>
 
     <main>
       <!-- dashboard -->
       <section id="dash" class="hidden">
         <div id="filters" class="filters"></div>
+        <div id="insights" class="panel insights hidden"></div>
         <div id="kpis" class="kpis"></div>
         <div class="panel chart-panel">
           <div id="chart"></div>
           <div id="tooltip" class="tooltip hidden"></div>
         </div>
+        <p id="imported-note" class="muted small hidden">Includes imported Google Analytics history.</p>
         <div class="grid">
           <div class="panel" data-panel="sources"></div>
           <div class="panel" data-panel="pages"></div>
           <div class="panel" data-panel="countries"></div>
           <div class="panel" data-panel="devices"></div>
           <div class="panel wide" data-panel="events"></div>
+          <div class="panel wide" id="funnels"></div>
         </div>
         <p class="foot muted">No cookies. No personal data. Visitors are counted with a hash that resets every day.</p>
       </section>
@@ -71,7 +104,6 @@
           </div>
           <p id="add-error" class="error"></p>
         </form>
-        <button id="logout" class="btn ghost">Sign out</button>
       </section>
 
       <!-- site settings -->
@@ -86,13 +118,36 @@
         </div>
         <div class="panel">
           <h2>2. Track goals (optional)</h2>
-          <p class="muted">Count signups, purchases, downloads. They show up under Goals.</p>
+          <p class="muted">Count signups, purchases, downloads. They show up under Goals, and you can use them in funnels.</p>
           <pre class="snippet">&lt;script&gt;window.dearme = window.dearme || function () { (dearme.q = dearme.q || []).push(arguments) }&lt;/script&gt;
 
 &lt;button onclick="dearme('Signup', { plan: 'pro' })"&gt;Sign up&lt;/button&gt;</pre>
           <p class="muted small">Add <code>data-outbound</code> to the script tag to count clicks on links to other sites.</p>
         </div>
-        <div class="panel">
+        <div class="panel manage-only">
+          <h2>Weekly email report</h2>
+          <p class="muted">Every Monday: last week's numbers, what changed, and why, in plain English.</p>
+          <div class="row">
+            <input id="report-emails" placeholder="you@example.com, teammate@example.com">
+            <button class="btn" id="report-save">Save</button>
+          </div>
+          <div class="row wrap gap">
+            <button class="btn ghost" id="report-send">Send one now</button>
+            <a class="btn ghost" id="report-preview" target="_blank" rel="noopener">Preview</a>
+          </div>
+          <p class="small" id="report-msg"></p>
+        </div>
+        <div class="panel manage-only">
+          <h2>Import from Google Analytics</h2>
+          <p class="muted">Bring your history with you. In Google Analytics, open a report (Pages, Traffic acquisition, Country, Device, or a report by Date), click <b>Share this report → Download file → CSV</b>, and drop the files here. Each file adds one report.</p>
+          <label class="drop" id="drop">
+            <input type="file" id="import-file" accept=".csv,text/csv" multiple hidden>
+            <span>Drop CSV files here, or <u>choose files</u></span>
+          </label>
+          <p class="small" id="import-msg"></p>
+          <div id="import-list"></div>
+        </div>
+        <div class="panel manage-only">
           <h2>Share a read-only dashboard</h2>
           <p class="muted">Anyone with the link can see this site's stats. Nobody can change anything.</p>
           <label class="switch"><input type="checkbox" id="share-toggle"> <span>Public link</span></label>
@@ -103,11 +158,51 @@
           <p class="muted">Download every event for the selected period as a spreadsheet.</p>
           <button class="btn" id="export-btn">Export CSV</button>
         </div>
-        <div class="panel danger">
+        <div class="panel danger manage-only">
           <h2>Delete this website</h2>
           <p class="muted">Removes the site and all of its stats. This cannot be undone.</p>
           <button class="btn danger" id="delete-btn">Delete site</button>
         </div>
+      </section>
+
+      <!-- team -->
+      <section id="team" class="hidden">
+        <h1>Team</h1>
+        <p class="muted">Everyone here sees all of this account's websites. Admins can also change settings and invite people; viewers can only look.</p>
+        <div id="team-list" class="panel"></div>
+        <form id="invite-new" class="panel">
+          <h2>Invite someone</h2>
+          <div class="row wrap gap">
+            <input id="invite-email" type="email" placeholder="name@example.com" required>
+            <select id="invite-role"><option value="viewer">Viewer</option><option value="admin">Admin</option></select>
+            <button class="btn primary">Create invite</button>
+          </div>
+          <p class="small" id="invite-msg"></p>
+        </form>
+      </section>
+
+      <!-- account / billing -->
+      <section id="account" class="hidden">
+        <h1 id="account-title">Plan and account</h1>
+        <div class="panel" id="plan-panel"></div>
+        <div class="plans" id="plans"></div>
+        <form class="panel" id="password-form">
+          <h2>Change your password</h2>
+          <div class="row wrap gap">
+            <input id="pw-current" type="password" placeholder="Current password" autocomplete="current-password" required>
+            <input id="pw-new" type="password" placeholder="New password (8+ characters)" autocomplete="new-password" minlength="8" required>
+            <button class="btn">Update</button>
+          </div>
+          <p class="small" id="pw-msg"></p>
+        </form>
+        <button id="logout" class="btn ghost">Sign out</button>
+      </section>
+
+      <!-- operator -->
+      <section id="admin" class="hidden">
+        <h1>Customers</h1>
+        <div id="admin-kpis" class="kpis small-kpis"></div>
+        <div class="panel" id="admin-list"></div>
       </section>
 
       <section id="empty" class="hidden center-block">

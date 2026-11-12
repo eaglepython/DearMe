@@ -11,6 +11,11 @@ Simple, private website analytics you own. A cookie-free alternative to Google A
 - **Live updates.** The dashboard refreshes the moment a visitor arrives.
 - **Share a public dashboard** with a read-only link, and **export to CSV** any time.
 - **Works with single-page apps** (React, Vue, Next.js) automatically.
+- **Insights in plain English.** "Reddit sent 42 more visitors than last week." An optional AI summary (Claude) and a Monday email report for each site.
+- **Funnels.** Home → Pricing → Signup: see where visitors drop off.
+- **Teams.** Invite people as admins or read-only viewers.
+- **Google Analytics import.** Upload GA4 or Universal Analytics CSV exports so your history comes with you.
+- **Ready to sell.** Sign-up, separate customer accounts, Stripe subscriptions with a free trial, a landing page with pricing, and an operator admin panel.
 - **Zero dependencies.** One Node process and one SQLite file. No Postgres, no ClickHouse, no Redis.
 
 ## Deploy in one command
@@ -51,6 +56,37 @@ Requires Node 22.5 or newer. No `npm install` needed.
 ```bash
 ADMIN_PASSWORD=your-secret node server.js
 ```
+
+## Two ways to run it
+
+**Just for your own sites.** Set `ADMIN_PASSWORD` and nothing else. Sign in at `/login` with that password (leave the email empty). Everything is unlimited.
+
+**As a paid service for customers.** Set the Stripe variables below. The home page becomes a landing page with pricing, anyone can sign up for a 14-day free trial, and each customer only sees their own sites. You still sign in with `ADMIN_PASSWORD` and get an **Admin** page listing every account, its plan, usage and revenue.
+
+### Selling it: Stripe setup (about 10 minutes)
+
+1. In Stripe, create three products with monthly prices (suggested: Starter $9 for 10k pageviews, Growth $19 for 100k, Business $49 for 1M). Copy each price id (`price_...`).
+2. Add a webhook endpoint `https://YOUR-DOMAIN/api/stripe/webhook` for the events `checkout.session.completed`, `customer.subscription.updated` and `customer.subscription.deleted`. Copy its signing secret (`whsec_...`).
+3. In Stripe's Billing settings, turn on the customer portal so customers can change or cancel their plan.
+4. Set the environment variables, then redeploy.
+
+| Variable | What it does |
+|---|---|
+| `ADMIN_PASSWORD` | Operator password (required) |
+| `PUBLIC_URL` | Your public address, e.g. `https://analytics.example.com`. Used in emails and Stripe redirects |
+| `STRIPE_SECRET_KEY` | Turns on billing, plans, sign-up and the landing page |
+| `STRIPE_WEBHOOK_SECRET` | Verifies Stripe webhooks |
+| `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_GROWTH`, `STRIPE_PRICE_BUSINESS` | Stripe price ids for each plan |
+| `TRIAL_DAYS` | Free trial length (default 14) |
+| `ALLOW_SIGNUP` | `true` or `false`. Defaults to on when billing is on |
+| `SHOW_LANDING` | Show the landing page at `/` even without billing |
+| `RESEND_API_KEY`, `REPORT_FROM` | Weekly email reports through [Resend](https://resend.com) (free tier: 3,000 emails a month). `REPORT_FROM` is e.g. `Dear Me <reports@yourdomain.com>` |
+| `REPORT_HOUR_UTC` | Hour reports go out on Mondays (default 8) |
+| `ANTHROPIC_API_KEY` | Adds an AI-written summary to insights and emails. Optional: plain-English insights work without it |
+| `INSIGHTS_MODEL` | Claude model for the summary (default `claude-opus-5-5`) |
+| `DATA_DIR`, `RETENTION_DAYS`, `PORT` | Storage folder, how long raw events are kept, and port |
+
+Plan limits: sites over their monthly pageviews keep being counted up to 150% of the limit, and expired trials get a 3-day grace period, so nobody loses data the moment they cross a line.
 
 ## Add it to a website
 
@@ -102,8 +138,14 @@ stats.your-domain.com {
 server.js          the whole backend: tracking endpoint, stats API, auth, static files
 lib/ua.js          browser / OS detection and bot filter
 lib/geo.js         time zone to country map
+lib/billing.js     plans, limits and Stripe (REST, no SDK)
+lib/funnels.js     funnel steps and counting
+lib/insights.js    week-over-week facts, plain-English bullets, AI summary
+lib/mailer.js      weekly email report (Resend)
+lib/importer.js    Google Analytics CSV import
+public/landing.html  marketing page with pricing
 public/script.js   the tracker your websites load
 public/            the dashboard (plain HTML, CSS, JS, no build step)
 scripts/demo-data.js  fills the database with sample traffic
-test/              end-to-end test
+test/              end-to-end tests
 ```

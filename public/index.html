@@ -49,6 +49,10 @@
     <header class="bar">
       <a class="logo" href="/app"><span class="mark"></span>Dear Me</a>
       <select id="site-select" aria-label="Website"></select>
+      <div id="site-tabs" class="seg hidden" role="tablist">
+        <button data-tab="analyst" role="tab">✦ Ask</button>
+        <button data-tab="dash" role="tab">Dashboard</button>
+      </div>
       <div id="live" class="live" title="Visitors in the last 5 minutes"><i></i><span>0</span> online</div>
       <div class="grow"></div>
       <select id="period" aria-label="Period">
@@ -71,6 +75,26 @@
     <div id="banner" class="banner hidden"></div>
 
     <main>
+      <!-- the analyst -->
+      <section id="analyst" class="hidden">
+        <div class="ask-hero">
+          <p class="eyebrow">✦ Your analyst</p>
+          <h1 class="ask-title">What do you want to know about <span id="ask-domain"></span>?</h1>
+          <form id="ask-form" class="ask-box">
+            <input id="ask-input" autocomplete="off" maxlength="500" placeholder="Ask anything, like “Where did my sales come from last month?”" aria-label="Ask a question">
+            <button class="btn primary" id="ask-btn">Ask</button>
+          </form>
+          <div id="ask-suggest" class="suggest"></div>
+        </div>
+        <div id="thread" class="thread"></div>
+        <div id="biz-kpis" class="kpis biz"></div>
+        <div class="agrid">
+          <div class="panel" id="steps-panel"></div>
+          <div class="panel" id="alerts-panel"></div>
+        </div>
+        <div class="panel" id="sources-panel"></div>
+      </section>
+
       <!-- dashboard -->
       <section id="dash" class="hidden">
         <div id="filters" class="filters"></div>
@@ -124,9 +148,34 @@
 &lt;button onclick="dearme('Signup', { plan: 'pro' })"&gt;Sign up&lt;/button&gt;</pre>
           <p class="muted small">Add <code>data-outbound</code> to the script tag to count clicks on links to other sites.</p>
         </div>
+        <div class="panel manage-only" id="data-panel">
+          <h2>3. Connect your sales and ads</h2>
+          <p class="muted">With sales and ad costs, your analyst can tell you which sources, pages and ads actually make money, and warn you when they stop.</p>
+          <div id="data-summary" class="data-summary"></div>
+          <h3>Sales</h3>
+          <p class="muted small"><b>Easiest:</b> send the amount with your purchase goal. Add the order number and it is matched with your shop's records, so nothing is counted twice.</p>
+          <pre class="snippet">dearme('Purchase', { revenue: 49.99, order_id: 'A1001' })</pre>
+          <p class="muted small"><b>Or connect your shop</b> by pasting this address as a webhook:
+            <b>Stripe</b> (Developers → Webhooks, events checkout.session.completed, invoice.paid, charge.refunded),
+            <b>Shopify</b> (Settings → Notifications → Webhooks, Order payment, JSON) or
+            <b>WooCommerce</b> (Settings → Advanced → Webhooks, Order updated).
+            Anything else can POST JSON like <code>{"amount": 49.99, "id": "A1001", "source": "google"}</code>.</p>
+          <div class="row"><input id="hook-url" readonly aria-label="Webhook address"><button class="btn" id="hook-copy">Copy</button></div>
+          <button class="link small" id="hook-rotate">Make a new address (the old one stops working)</button>
+          <h3>Upload a file</h3>
+          <div class="row wrap gap">
+            <select id="data-kind" aria-label="What is in the file"><option value="sales">Sales or orders</option><option value="ads">Ad costs</option></select>
+            <select id="data-channel" class="hidden" aria-label="Ad platform"><option>Google Ads</option><option>Meta Ads</option><option>TikTok Ads</option><option>LinkedIn Ads</option><option>Microsoft Ads</option><option>Pinterest Ads</option><option>Reddit Ads</option><option value="Ads">Other</option></select>
+            <label class="btn" for="data-file">Choose CSV files</label><input type="file" id="data-file" accept=".csv,text/csv" multiple hidden>
+            <div class="grow"></div>
+            <label class="small muted">Currency <select id="data-currency"></select></label>
+          </div>
+          <p class="muted small" id="data-hint"></p>
+          <p class="small" id="data-msg"></p>
+        </div>
         <div class="panel manage-only">
           <h2>Weekly email report</h2>
-          <p class="muted">Every Monday: last week's numbers, what changed, and why, in plain English.</p>
+          <p class="muted">Every Monday: last week's numbers, what changed, and why, in plain English. The same people also get urgent alerts, like tracking that stopped or sales that fell.</p>
           <div class="row">
             <input id="report-emails" placeholder="you@example.com, teammate@example.com">
             <button class="btn" id="report-save">Save</button>

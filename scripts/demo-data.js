@@ -17,11 +17,22 @@ db.exec(`CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY, domain TEXT U
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL, session_id INTEGER NOT NULL, ts INTEGER NOT NULL, visitor TEXT NOT NULL,
     name TEXT NOT NULL, path TEXT, props TEXT, source TEXT, utm_medium TEXT, utm_campaign TEXT, country TEXT, browser TEXT, os TEXT, device TEXT);`);
 
+require('../lib/business').setup(db);
 const DOMAIN = process.argv[2] || 'demo.example.com';
 let site = db.prepare('SELECT id FROM sites WHERE domain = ?').get(DOMAIN);
 if (!site) site = { id: Number(db.prepare('INSERT INTO sites(domain, created) VALUES(?, ?)').run(DOMAIN, Date.now()).lastInsertRowid) };
 db.prepare('DELETE FROM events WHERE site_id = ?').run(site.id);
 db.prepare('DELETE FROM sessions WHERE site_id = ?').run(site.id);
+db.prepare('DELETE FROM orders WHERE site_id = ?').run(site.id);
+db.prepare('DELETE FROM ad_spend WHERE site_id = ?').run(site.id);
+db.prepare('DELETE FROM alerts WHERE site_id = ?').run(site.id);
+const insO = db.prepare(`INSERT OR IGNORE INTO orders(site_id, ts, amount, currency, ref, origin, source, medium, campaign, page, country, device) VALUES(?, ?, ?, 'USD', ?, 'tracker', ?, ?, ?, ?, ?, ?)`);
+const insA = db.prepare('INSERT OR REPLACE INTO ad_spend(site_id, day, channel, campaign, spend, clicks, impressions) VALUES(?, ?, ?, ?, ?, ?, ?)');
+// paid traffic: [utm_source, utm_medium, campaign, share of visits, chance to buy]
+const PAID = [['google', 'cpc', 'search-brand', 0.07, 0.2], ['google', 'cpc', 'search-generic', 0.04, 0.04], ['facebook', 'paid_social', 'retargeting-nov', 0.05, 0.006]];
+const ADS = [['Google', 'search-brand', 18], ['Google', 'search-generic', 26], ['Meta', 'retargeting-nov', 34]];
+const PRICES = [[49, 6], [99, 3], [249, 1]];
+let orders = 0;
 
 const pick = (arr) => { const total = arr.reduce((s, [, w]) => s + w, 0); let r = Math.random() * total; for (const [v, w] of arr) { if ((r -= w) <= 0) return v; } return arr[0][0]; };
 const PAGES = [['/', 40], ['/pricing', 14], ['/blog/privacy-first-analytics', 10], ['/features', 9], ['/blog/why-we-dropped-cookies', 7], ['/docs/getting-started', 6], ['/about', 4], ['/signup', 5], ['/contact', 3], ['/blog/gdpr-guide', 2]];
@@ -50,29 +61,41 @@ for (let d = 90; d >= 0; d--) {
     const start = dayStart.getTime() + hour * 3600e3 + Math.random() * 3600e3;
     if (start > now) continue;
     const visitor = Math.random().toString(36).slice(2, 12);
-    const source = d === 12 && Math.random() < 0.6 ? 'Hacker News' : pick(SOURCES);
-    const campaign = source === 'newsletter' ? 'november-launch' : null;
+    let source = d === 12 && Math.random() < 0.6 ? 'Hacker News' : pick(SOURCES);
+    let campaign = source === 'newsletter' ? 'november-launch' : null, medium = campaign ? 'email' : null, buyChance = source === 'newsletter' ? 0.05 : source === 'Hacker News' ? 0.004 : 0.035;
+    const roll = Math.random(); let acc = 0;
+    for (const [src, med, camp, share, chance] of PAID) { acc += share; if (roll < acc && d !== 12) { source = src; medium = med; campaign = camp; buyChance = chance; break; } }
     const browser = pick(BROWSERS);
     const device = browser === 'Samsung Internet' ? 'Mobile' : pick(DEVICES);
     const os = device === 'Desktop' ? pick([['Windows', 50], ['macOS', 40], ['Linux', 10]]) : browser === 'Safari' ? 'iOS' : pick([['Android', 70], ['iOS', 30]]);
     const country = pick(COUNTRIES);
     const views = Math.random() < 0.42 ? 1 : 1 + Math.ceil(Math.random() * Math.random() * 7);
     let t = start, entry, exit;
-    const r = insS.run(site.id, visitor, start, start, 0, 0, '', '', source, campaign ? 'email' : null, campaign, country, browser, os, device);
+    const r = insS.run(site.id, visitor, start, start, 0, 0, '', '', source, medium, campaign, country, browser, os, device);
     const sid = Number(r.lastInsertRowid);
     for (let v = 0; v < views; v++) {
       const page = v === 0 && source === 'Hacker News' ? '/blog/privacy-first-analytics' : pick(PAGES);
       if (!entry) entry = page; exit = page;
-      insE.run(site.id, sid, t, visitor, 'pageview', page, null, source, campaign ? 'email' : null, campaign, country, browser, os, device);
+      insE.run(site.id, sid, t, visitor, 'pageview', page, null, source, medium, campaign, country, browser, os, device);
       events++;
       if (page === '/signup' && Math.random() < 0.45) { insE.run(site.id, sid, t + 20e3, visitor, 'Signup', page, JSON.stringify({ plan: pick([['free', 7], ['pro', 3]]) }), source, null, campaign, country, browser, os, device); events++; }
       if (page === '/docs/getting-started' && Math.random() < 0.3) { insE.run(site.id, sid, t + 15e3, visitor, 'Download', page, null, source, null, campaign, country, browser, os, device); events++; }
       if (v < views - 1) t += 15e3 + Math.random() * 120e3;
+    }
+    // some visits buy; phones buy less often (something for the analyst to find)
+    if (views > 1 && Math.random() < buyChance * (device === 'Mobile' ? 0.45 : 1.4)) {
+      const amount = pick(PRICES), ts = t + 30e3, ref = 'ev:' + sid;
+      insE.run(site.id, sid, ts, visitor, 'Purchase', '/checkout', JSON.stringify({ revenue: amount }), source, medium, campaign, country, browser, os, device); events++;
+      insO.run(site.id, ts, amount, ref, source, medium, campaign, entry, country, device); orders++;
     }
     const engaged = views === 1 ? Math.round(5e3 + Math.random() * 40e3) : Math.round(t - start + 10e3 + Math.random() * 60e3);
     db.prepare('UPDATE sessions SET last = ?, pageviews = ?, engaged = ?, entry = ?, exit = ? WHERE id = ?').run(t, views, engaged, entry, exit, sid);
     sessions++;
   }
 }
+for (let d = 60; d >= 1; d--) {
+  const day = new Date(now - d * 864e5).toISOString().slice(0, 10);
+  for (const [ch, camp, budget] of ADS) { const spend = Math.round(budget * (0.8 + Math.random() * 0.4) * 100) / 100; insA.run(site.id, day, ch, camp, spend, Math.round(spend / (0.6 + Math.random())), Math.round(spend * 90)); }
+}
 db.exec('COMMIT');
-console.log(`Added ${sessions.toLocaleString()} visits and ${events.toLocaleString()} events for ${DOMAIN}.`);
+console.log(`Added ${sessions.toLocaleString()} visits, ${events.toLocaleString()} events, ${orders} orders and 60 days of ad spend for ${DOMAIN}.`);

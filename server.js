@@ -21,6 +21,9 @@ const insights = require('./lib/insights');
 const mailer = require('./lib/mailer');
 const billing = require('./lib/billing');
 const { parseGaCsv, normalizeKey } = require('./lib/importer');
+const business = require('./lib/business');
+const analyst = require('./lib/analyst');
+const alerts = require('./lib/alerts');
 
 const PORT = +process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -84,6 +87,7 @@ if (!siteCols.includes('report_emails')) db.exec('ALTER TABLE sites ADD COLUMN r
 if (!db.prepare('SELECT 1 FROM accounts WHERE id = 1').get())
   db.prepare('INSERT INTO accounts(id, name, created, trial_ends, plan, status) VALUES(1, ?, ?, ?, NULL, ?)').run('My sites', Date.now(), 4102444800000, 'operator');
 db.exec('UPDATE sites SET account_id = 1 WHERE account_id IS NULL');
+business.setup(db); // sales, ad spend, alerts, questions
 
 const getSetting = db.prepare('SELECT value FROM settings WHERE key = ?');
 const setSetting = db.prepare('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
@@ -143,7 +147,7 @@ const cleanDomain = (d) => String(d || '').trim().toLowerCase().replace(/^https?
 // ---------------------------------------------------------------- ingest
 const q = {
   siteByDomain: db.prepare('SELECT id, domain, account_id FROM sites WHERE domain = ?'),
-  findSession: db.prepare('SELECT id, source, utm_medium, utm_campaign, country, browser, os, device FROM sessions WHERE site_id = ? AND visitor = ? AND last > ? ORDER BY last DESC LIMIT 1'),
+  findSession: db.prepare('SELECT id, entry, source, utm_medium, utm_campaign, country, browser, os, device FROM sessions WHERE site_id = ? AND visitor = ? AND last > ? ORDER BY last DESC LIMIT 1'),
   newSession: db.prepare(`INSERT INTO sessions(site_id, visitor, start, last, pageviews, entry, exit, source, utm_medium, utm_campaign, country, browser, os, device)
     VALUES(?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   touchPageview: db.prepare('UPDATE sessions SET last = ?, pageviews = pageviews + 1, exit = ? WHERE id = ?'),
@@ -186,7 +190,7 @@ function ingest(body, req) {
   if (!s) {
     const r = q.newSession.run(site.id, visitor, now, now, pathName, pathName, source,
       p.get('utm_medium')?.slice(0, 100) || null, p.get('utm_campaign')?.slice(0, 100) || null, country, browser, os, device);
-    s = { id: Number(r.lastInsertRowid), source, utm_medium: p.get('utm_medium')?.slice(0, 100) || null,
+    s = { id: Number(r.lastInsertRowid), entry: pathName, source, utm_medium: p.get('utm_medium')?.slice(0, 100) || null,
       utm_campaign: p.get('utm_campaign')?.slice(0, 100) || null, country, browser, os, device };
   }
   if (name === 'pageview') q.touchPageview.run(now, pathName, s.id); else q.touchEvent.run(now, s.id);
@@ -198,7 +202,17 @@ function ingest(body, req) {
     props = JSON.stringify(o);
   }
   // events carry the session's attributes so every report can be filtered the same way
-  q.insertEvent.run(site.id, s.id, now, visitor, name, pathName, props, s.source, s.utm_medium, s.utm_campaign, s.country, s.browser, s.os, s.device);
+  const ev = q.insertEvent.run(site.id, s.id, now, visitor, name, pathName, props, s.source, s.utm_medium, s.utm_campaign, s.country, s.browser, s.os, s.device);
+  // a goal with an amount is a sale: dearme('Purchase', { revenue: 49, order_id: 'A1001' })
+  if (name !== 'pageview' && body.p && typeof body.p === 'object') {
+    const amount = business.money(body.p.revenue ?? body.p.amount ?? body.p.value ?? body.p.total);
+    if (amount != null && amount !== 0 && Math.abs(amount) < 1e9) {
+      const id = body.p.order_id ?? body.p.orderId ?? body.p.order ?? body.p.transaction_id;
+      business.saveOrders(db, site.id, 'tracker', [{ ts: now, amount, currency: body.p.currency ? String(body.p.currency).toUpperCase() : null,
+        ref: id != null && id !== '' ? 'order:' + String(id).replace(/^#/, '') : 'ev:' + ev.lastInsertRowid,
+        source: s.source, medium: s.utm_medium, campaign: s.utm_campaign, page: s.entry || pathName, country: s.country, device: s.device }]);
+    }
+  }
   live.emit(site.id);
 }
 
@@ -354,6 +368,33 @@ function exportCsv(siteId, from, to) {
   return [head, ...rows.map((r) => [new Date(r.ts).toISOString(), r.name, r.path, r.source, r.utm_medium, r.utm_campaign, r.country, r.browser, r.os, r.device, r.props].map(esc).join(','))].join('\n');
 }
 
+
+// ---------------------------------------------------------------- the analyst
+const engine = analyst.createEngine(db, { countryNames: COUNTRY_NAMES });
+const ingestKey = (site) => site.ingest_key || (() => {
+  const k = crypto.randomBytes(18).toString('base64url');
+  db.prepare('UPDATE sites SET ingest_key = ? WHERE id = ?').run(k, site.id);
+  return k;
+})();
+const alertChecked = new Map();
+async function checkAlerts(site, origin) {
+  const now = Date.now();
+  if (now - (alertChecked.get(site.id) || 0) < 10 * 60000) return [];
+  alertChecked.set(site.id, now);
+  let fresh = [];
+  try { fresh = alerts.save(db, site.id, alerts.detect(db, engine, analyst, site, { now, tz: +site.tz || 0 })); }
+  catch (e) { console.error(`Alert check for ${site.domain} failed:`, e.message); return []; }
+  const urgent = fresh.filter((a) => a.severity === 'high');
+  const emails = String(site.report_emails || '').split(',').map((s) => s.trim()).filter(validEmail);
+  if (urgent.length && emails.length && mailer.emailEnabled()) {
+    try {
+      await mailer.sendEmail({ to: emails, subject: `${site.domain}: ${urgent[0].title}`, html: alerts.alertEmailHtml(site.domain, urgent, origin ? `${origin}/site/${site.id}` : null) });
+      db.prepare(`UPDATE alerts SET emailed = 1 WHERE site_id = ? AND key IN (${urgent.map(() => '?').join(',')})`).run(site.id, ...urgent.map((a) => a.key));
+    } catch (e) { console.error('Alert email failed:', e.message); }
+  }
+  return fresh;
+}
+const recentAlerts = (siteId, days = 14) => db.prepare('SELECT id, created, kind, severity, title, body, seen FROM alerts WHERE site_id = ? AND created > ? ORDER BY created DESC LIMIT 20').all(siteId, Date.now() - days * 864e5);
 
 // ---------------------------------------------------------------- accounts, people, sessions
 const SIGNUP_OPEN = process.env.ALLOW_SIGNUP ? process.env.ALLOW_SIGNUP === 'true' : billing.billingEnabled();
@@ -523,8 +564,22 @@ const server = http.createServer(async (req, res) => {
       return send(res, 202, 'ok', CORS);
     }
     if (p === '/health') return send(res, 200, { ok: true });
+
+    // --- sales and ad spend from shops, payment providers and scripts: POST /api/hooks/<site key>
+    if (parts[0] === 'api' && parts[1] === 'hooks' && parts[2]) {
+      if (req.method !== 'POST') return send(res, 405, 'POST only');
+      const site = db.prepare('SELECT * FROM sites WHERE ingest_key = ?').get(parts[2]);
+      if (!site) return send(res, 404, { error: 'Unknown key' });
+      if (rateLimited('hook:' + site.id, 600)) return send(res, 429, { error: 'Slow down' });
+      let body;
+      try { body = JSON.parse(await readBody(req, 1024 * 1024)); } catch { return send(res, 400, { error: 'Send JSON' }); }
+      const r = business.fromWebhook(body, sourceFrom);
+      business.saveOrders(db, site.id, 'webhook', r.orders);
+      business.saveAds(db, site.id, r.ads);
+      return send(res, 200, { ok: true, provider: r.provider, orders: r.orders.length, ad_rows: r.ads.length });
+    }
     if (p === '/api/config') {
-      return send(res, 200, { signup: SIGNUP_OPEN, billing: billing.billingEnabled(), email: mailer.emailEnabled(), ai: !!process.env.ANTHROPIC_API_KEY,
+      return send(res, 200, { signup: SIGNUP_OPEN, billing: billing.billingEnabled(), email: mailer.emailEnabled(), ai: !!process.env.ANTHROPIC_API_KEY, analyst: true,
         trialDays: billing.TRIAL_DAYS, plans: Object.entries(billing.PLANS).map(([id, pl]) => ({ id, name: pl.name, pageviews: pl.pageviews, price: pl.price, sites: pl.sites })) });
     }
 
@@ -637,7 +692,7 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/')) {
       const who = me(req);
       if (!who) return send(res, 401, { error: 'login' });
-      const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await jsonBody(req, p.endsWith('/imports') ? 8 * 1024 * 1024 : 64 * 1024) : {};
+      const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await jsonBody(req, p.endsWith('/imports') || p.endsWith('/data') ? 8 * 1024 * 1024 : 64 * 1024) : {};
 
       // --- your own password
       if (p === '/api/account/password' && req.method === 'POST') {
@@ -736,6 +791,51 @@ const server = http.createServer(async (req, res) => {
               FROM sites s WHERE s.account_id = ? ORDER BY s.domain`).all(Date.now() - 864e5, accId);
           return send(res, 200, { sites, canManage: canManage(who) });
         }
+        // --- the analyst: everyone on the team can ask
+        if (parts[2] && ['ask', 'brief', 'alerts'].includes(parts[3])) {
+          const site = ownSite(who, +parts[2]);
+          if (!site) return send(res, 404, { error: 'Not found' });
+          const tz = Math.max(-840, Math.min(840, +(body.tz ?? params.get('tz')) || 0));
+          if (req.method === 'GET' && site.tz !== tz) db.prepare('UPDATE sites SET tz = ? WHERE id = ?').run(tz, site.id); // alerts use the owner's day
+          site.tz = tz;
+          if (parts[3] === 'ask' && req.method === 'POST') {
+            const question = String(body.question || '').trim().slice(0, 500);
+            if (!question) return send(res, 400, { error: 'Ask a question' });
+            const aiOn = !!process.env.ANTHROPIC_API_KEY;
+            const limit = +process.env.ANALYST_DAILY_LIMIT || 200;
+            const used = aiOn ? db.prepare('SELECT COUNT(*) n FROM questions q JOIN sites s ON s.id = q.site_id WHERE s.account_id = ? AND q.ai = 1 AND q.created > ?').get(who.account.id, Date.now() - 864e5).n : 0;
+            const r = await analyst.ask(engine, site, question, { tz, context: body.context, history: Array.isArray(body.history) ? body.history : [], countryNames: COUNTRY_NAMES,
+              alerts: recentAlerts(site.id, 7), ai: aiOn && used < limit });
+            db.prepare('INSERT INTO questions(site_id, user_id, created, question, answer, ai) VALUES(?, ?, ?, ?, ?, ?)').run(site.id, who.uid, Date.now(), question, r.answer, r.ai ? 1 : 0);
+            return send(res, 200, r);
+          }
+          if (parts[3] === 'brief' && req.method === 'GET') {
+            await checkAlerts(site, baseUrl(req));
+            const conn = engine.connected(site.id);
+            const kp = (m, ok = true) => (ok ? engine.query(site.id, { metric: m, period: 'last_7_days', tz }) : null);
+            const kpis = [kp('visitors'), kp('conversions', conn.goals), kp('revenue', conn.sales), kp('roas', conn.ads)].filter(Boolean)
+              .map((r) => ({ metric: r.metric, label: r.metricLabel, value: r.total, display: analyst.formatValue(r.metric, r.total, site.currency || 'USD'), change: r.change, lowerIsBetter: r.lowerIsBetter }));
+            const known = engine.knownValues(site.id);
+            const suggestions = [
+              'How am I doing this week?',
+              conn.sales ? 'Where did my sales come from last month?' : 'Where do my visitors come from?',
+              conn.ads ? 'Which ads are worth it?' : 'Which pages do people land on?',
+              'Why did visitors change this week?',
+              conn.goals ? `Which sources convert best?` : 'Which day of the week is busiest?',
+              'What should I do next?',
+            ];
+            if (known.goals[0] && conn.goals) suggestions.splice(3, 0, `What's the ${known.goals[0]} conversion rate on phones vs computers?`);
+            return send(res, 200, { domain: site.domain, currency: site.currency || 'USD', ai: !!process.env.ANTHROPIC_API_KEY, connected: conn, kpis,
+              nextSteps: engine.recommendations(site.id, { tz, currency: site.currency || 'USD' }), alerts: recentAlerts(site.id), suggestions: suggestions.slice(0, 6),
+              recent: db.prepare('SELECT question FROM questions WHERE site_id = ? AND user_id = ? GROUP BY question ORDER BY MAX(created) DESC LIMIT 5').all(site.id, who.uid).map((x) => x.question) });
+          }
+          if (parts[3] === 'alerts' && parts[4] === 'seen' && req.method === 'POST') {
+            db.prepare('UPDATE alerts SET seen = 1 WHERE site_id = ?').run(site.id);
+            return send(res, 200, { ok: true });
+          }
+          if (parts[3] === 'alerts' && req.method === 'GET') return send(res, 200, { alerts: recentAlerts(site.id, 30) });
+          return send(res, 404, { error: 'Not found' });
+        }
         if (!canManage(who)) return send(res, 403, { error: 'Viewers can look but not change settings. Ask an owner or admin.' });
         if (p === '/api/sites' && req.method === 'POST') {
           const domain = cleanDomain(body.domain);
@@ -752,7 +852,7 @@ const server = http.createServer(async (req, res) => {
         const sub = parts[3];
         if (!sub && req.method === 'DELETE') {
           db.exec('BEGIN');
-          for (const t of ['events', 'sessions', 'funnels', 'imported', 'imports']) db.prepare(`DELETE FROM ${t} WHERE site_id = ?`).run(site.id);
+          for (const t of ['events', 'sessions', 'funnels', 'imported', 'imports', 'orders', 'ad_spend', 'alerts', 'questions']) db.prepare(`DELETE FROM ${t} WHERE site_id = ?`).run(site.id);
           db.prepare('DELETE FROM sites WHERE id = ?').run(site.id);
           db.exec('COMMIT');
           return send(res, 200, { ok: true });
@@ -777,6 +877,38 @@ const server = http.createServer(async (req, res) => {
           if (parts[4] === 'preview' && req.method === 'GET') {
             const r = await siteInsights(site);
             return send(res, 200, mailer.reportHtml({ domain: site.domain, ...r, dashboardUrl: `${baseUrl(req)}/site/${site.id}` }), { 'Content-Type': 'text/html; charset=utf-8' });
+          }
+        }
+        if (sub === 'data') {
+          // connected sales and ad data: summary, CSV upload, currency, clearing, and the webhook key
+          if (req.method === 'GET') return send(res, 200, { ...business.dataSummary(db, site.id), currency: site.currency || 'USD', webhook: `${baseUrl(req)}/api/hooks/${ingestKey(site)}` });
+          if (req.method === 'POST' && parts[4] === 'key') {
+            db.prepare('UPDATE sites SET ingest_key = NULL WHERE id = ?').run(site.id);
+            return send(res, 200, { webhook: `${baseUrl(req)}/api/hooks/${ingestKey({ id: site.id })}` });
+          }
+          if (req.method === 'PUT') {
+            const cur = String(body.currency || '').toUpperCase();
+            if (!/^[A-Z]{3}$/.test(cur)) return send(res, 400, { error: 'Use a 3-letter currency code like USD or EUR' });
+            db.prepare('UPDATE sites SET currency = ? WHERE id = ?').run(cur, site.id);
+            return send(res, 200, { currency: cur });
+          }
+          if (req.method === 'POST') {
+            try {
+              if (body.kind === 'ads') {
+                const rows = business.parseAdsCsv(String(body.csv || ''), String(body.channel || '').trim() || 'Ads');
+                business.saveAds(db, site.id, rows);
+                const days = rows.map((r) => r.day).sort();
+                return send(res, 201, { kind: 'ads', rows: rows.length, spend: Math.round(rows.reduce((s, r) => s + r.spend, 0) * 100) / 100, from: days[0], to: days.at(-1), channels: [...new Set(rows.map((r) => r.channel))] });
+              }
+              const rows = business.parseOrdersCsv(String(body.csv || ''));
+              business.saveOrders(db, site.id, 'csv', rows);
+              const ts = rows.map((r) => r.ts).sort((a, b) => a - b);
+              return send(res, 201, { kind: 'sales', rows: rows.length, revenue: Math.round(rows.reduce((s, r) => s + r.amount, 0) * 100) / 100, from: new Date(ts[0]).toISOString().slice(0, 10), to: new Date(ts.at(-1)).toISOString().slice(0, 10) });
+            } catch (e) { return send(res, 400, { error: e.message }); }
+          }
+          if (req.method === 'DELETE' && ['sales', 'ads'].includes(parts[4])) {
+            db.prepare(`DELETE FROM ${parts[4] === 'ads' ? 'ad_spend' : 'orders'} WHERE site_id = ?`).run(site.id);
+            return send(res, 200, { ok: true });
           }
         }
         if (sub === 'funnels') {
@@ -845,6 +977,11 @@ function hourly() {
     db.prepare('DELETE FROM sessions WHERE last < ?').run(cutoff);
   }
   weeklyReports().catch((e) => console.error(e));
+  // proactive alerts for every site that had visitors this month
+  (async () => {
+    for (const site of db.prepare('SELECT * FROM sites WHERE id IN (SELECT DISTINCT site_id FROM sessions WHERE start > ?)').all(Date.now() - 30 * 864e5))
+      await checkAlerts(site, process.env.PUBLIC_URL);
+  })().catch((e) => console.error(e));
 }
 setInterval(hourly, 3600e3).unref();
 hourly();

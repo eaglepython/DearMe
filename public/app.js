@@ -15,6 +15,7 @@
     sites: [], site: null, period: localGet('period') || '7d', metric: 'visitors', filters: {},
     tabs: { sources: 'sources', pages: 'pages', devices: 'browsers' }, data: null,
     me: null, config: {}, canManage: false, funnels: [], funnelId: null,
+    tab: 'analyst', brief: null, askContext: null, history: [], turns: [],
   };
 
   function localGet(k) { try { return localStorage.getItem('dm_' + k); } catch { return null; } }
@@ -31,7 +32,7 @@
   const post = (path, body, method = 'POST') => api(path, { method, body: JSON.stringify(body || {}) });
 
   // ------------------------------------------------------------ views
-  const VIEWS = ['dash', 'sites', 'settings', 'empty', 'team', 'account', 'admin'];
+  const VIEWS = ['analyst', 'dash', 'sites', 'settings', 'empty', 'team', 'account', 'admin'];
   function view(id) {
     for (const s of VIEWS) $('#' + s).classList.toggle('hidden', s !== id);
     const shared = !!shareToken;
@@ -41,7 +42,9 @@
     $('#admin-btn').classList.toggle('hidden', shared || !state.me?.operator);
     $('#period').classList.toggle('hidden', id !== 'dash');
     $('#live').classList.toggle('hidden', id !== 'dash');
-    $('#site-select').classList.toggle('hidden', !state.sites.length || !['dash', 'settings'].includes(id));
+    $('#site-select').classList.toggle('hidden', !state.sites.length || !['analyst', 'dash', 'settings'].includes(id));
+    $('#site-tabs').classList.toggle('hidden', shared || !state.site || !['analyst', 'dash'].includes(id));
+    $$('#site-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
     $$('.manage-only').forEach((el) => el.classList.toggle('hidden', !state.canManage));
     window.scrollTo(0, 0);
   }
@@ -115,7 +118,7 @@
     const want = p[0] === 'site' ? +p[1] : +localGet('site');
     const site = state.sites.find((x) => x.id === want) || state.sites[0];
     if (!site) { view('empty'); $('#empty-add').classList.toggle('hidden', !state.canManage); return; }
-    openSite(site.id, true);
+    openSite(site.id, true, p[0] === 'site' && p[2] === 'dashboard' ? 'dash' : p[0] === 'site' ? 'analyst' : localGet('tab') || 'analyst');
   }
 
   function renderBanner() {
@@ -136,16 +139,20 @@
     $('#site-select').innerHTML = state.sites.map((s) => `<option value="${s.id}">${esc(s.domain)}</option>`).join('');
     if (state.site) $('#site-select').value = state.site.id;
   }
-  $('#site-select').addEventListener('change', (e) => openSite(+e.target.value));
+  $('#site-select').addEventListener('change', (e) => openSite(+e.target.value, false, state.tab));
+  $$('#site-tabs button').forEach((b) => b.addEventListener('click', () => openSite(state.site.id, false, b.dataset.tab)));
 
-  function openSite(id, replace) {
+  function openSite(id, replace, tab = state.tab) {
+    const changed = state.site?.id !== id;
     state.site = state.sites.find((s) => s.id === id);
-    state.filters = {}; state.funnelId = null;
-    localSet('site', id);
-    if (!shareToken) history[replace ? 'replaceState' : 'pushState'](null, '', `/site/${id}`);
+    if (changed) { state.filters = {}; state.funnelId = null; state.turns = []; state.history = []; state.askContext = null; $('#thread').innerHTML = ''; }
+    state.tab = shareToken ? 'dash' : tab === 'dash' ? 'dash' : 'analyst';
+    localSet('site', id); localSet('tab', state.tab);
+    if (!shareToken) history[replace ? 'replaceState' : 'pushState'](null, '', state.tab === 'dash' ? `/site/${id}/dashboard` : `/site/${id}`);
     $('#site-select').value = id;
     $('#period').value = state.period;
-    view('dash');
+    view(state.tab);
+    if (state.tab === 'analyst') return showAnalyst();
     load();
     loadInsights();
     connectLive();
@@ -158,7 +165,7 @@
   $('#team-btn').addEventListener('click', showTeam);
   $('#account-btn').addEventListener('click', showAccount);
   $('#admin-btn').addEventListener('click', showAdmin);
-  $('#settings-back').addEventListener('click', () => openSite(state.site.id));
+  $('#settings-back').addEventListener('click', () => openSite(state.site.id, false, state.tab));
   window.addEventListener('popstate', () => boot());
 
   // ------------------------------------------------------------ data
@@ -417,6 +424,165 @@
     };
   }
 
+  // ------------------------------------------------------------ the analyst
+  const tz = () => -new Date().getTimezoneOffset();
+  const ago = (ts) => { const m = Math.round((Date.now() - ts) / 60000); return m < 60 ? `${Math.max(1, m)} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`; };
+
+  async function showAnalyst() {
+    const site = state.site;
+    $('#ask-domain').textContent = site.domain;
+    $('#ask-input').value = '';
+    renderThread();
+    $('#biz-kpis').innerHTML = '';
+    $('#steps-panel').innerHTML = '<div class="ph"><h2>Next steps</h2></div><p class="muted small">Looking at your numbers…</p>';
+    $('#alerts-panel').innerHTML = '<div class="ph"><h2>Alerts</h2></div>';
+    $('#sources-panel').innerHTML = '';
+    let b;
+    try { b = await api(`/api/sites/${site.id}/brief?tz=${tz()}`); } catch { return; }
+    if (state.site.id !== site.id) return;
+    state.brief = b;
+    renderSuggest();
+    $('#biz-kpis').innerHTML = b.kpis.map((k) => {
+      const good = k.change == null || k.change === 0 ? 'flat' : (k.change > 0) !== k.lowerIsBetter ? 'up' : 'down';
+      return `<button class="kpi" data-q="${esc(`How did my ${k.label} change this week?`)}"><div class="label">${esc(k.label[0].toUpperCase() + k.label.slice(1))} · 7 days</div><div class="value">${esc(k.display)}</div>
+        <div class="delta ${good}">${k.change == null ? '&nbsp;' : `${k.change > 0 ? '↑' : k.change < 0 ? '↓' : ''} ${Math.abs(k.change)}%`}</div></button>`;
+    }).join('');
+    $$('#biz-kpis [data-q]').forEach((el) => el.addEventListener('click', () => askQ(el.dataset.q)));
+    renderSteps(b.nextSteps);
+    renderAlerts(b.alerts);
+    renderSources(b.connected);
+  }
+  function renderSuggest() {
+    const b = state.brief; if (!b) return;
+    const recent = (b.recent || []).filter((q) => !b.suggestions.includes(q)).slice(0, 2);
+    $('#ask-suggest').innerHTML = [...b.suggestions, ...recent].map((q) => `<button class="chip ghosty" data-q="${esc(q)}">${esc(q)}</button>`).join('');
+    $$('#ask-suggest [data-q]').forEach((el) => el.addEventListener('click', () => askQ(el.dataset.q)));
+  }
+  function renderSteps(steps) {
+    $('#steps-panel').innerHTML = `<div class="ph"><h2>Next steps</h2><span class="muted small">last 30 days</span></div>` + (steps.length ? `<ol class="steps">${steps.map((r, i) => `
+      <li class="step ${r.tone}"><div class="st">${esc(r.title)}</div><div class="sw">${esc(r.why)}</div>${r.action ? `<div class="sa">→ ${esc(r.action)}</div>` : ''}
+        ${r.ask ? `<button class="link small" data-q="${esc(r.ask)}">Ask: ${esc(r.ask)}</button>` : r.setup && state.canManage ? `<button class="link small" data-setup="1">Set it up</button>` : ''}</li>`).join('')}</ol>`
+      : '<p class="muted small">Nothing urgent. I will suggest next steps as data comes in.</p>');
+    $$('#steps-panel [data-q]').forEach((el) => el.addEventListener('click', () => askQ(el.dataset.q)));
+    $$('#steps-panel [data-setup]').forEach((el) => el.addEventListener('click', () => { showSettings(); $('#data-panel').scrollIntoView({ behavior: 'smooth' }); }));
+  }
+  function renderAlerts(list) {
+    const unseen = list.filter((a) => !a.seen).length;
+    $('#alerts-panel').innerHTML = `<div class="ph"><h2>Alerts</h2>${unseen ? `<span class="pill">${unseen} new</span>` : ''}</div>` + (list.length ? `<div class="alerts">${list.slice(0, 6).map((a) => `
+      <div class="alert ${a.severity} ${a.seen ? '' : 'new'}"><i></i><div><div class="at">${esc(a.title)}</div><div class="ab">${esc(a.body || '')}</div><div class="muted small">${ago(a.created)}</div></div></div>`).join('')}</div>`
+      : '<p class="muted small">All quiet. I check every hour for drops, spikes, tracking problems and ads that stop paying off.</p>');
+    if (unseen) setTimeout(() => post(`/api/sites/${state.site.id}/alerts/seen`).catch(() => {}), 4000);
+  }
+  function renderSources(c) {
+    const tile = (on, name, yes, no, setup) => `<div class="src ${on ? 'on' : ''}"><div class="sn">${on ? '✓' : '○'} ${name}</div><div class="muted small">${on ? yes : no}</div>
+      ${!on && setup && state.canManage ? '<button class="link small" data-setup="1">Connect</button>' : ''}</div>`;
+    $('#sources-panel').innerHTML = `<div class="ph"><h2>What I can see</h2><span class="muted small">${state.brief.ai ? 'AI answers on' : 'Instant answers'}</span></div><div class="srcs">
+      ${tile(c.website, 'Website', 'Visitors, pages, sources', 'Add the snippet to your site', true)}
+      ${tile(c.goals, 'Goals', 'Signups, purchases, downloads', 'Track signups or purchases', true)}
+      ${tile(c.sales, 'Sales', 'Revenue by source and page', 'Connect Stripe, Shopify or a CSV', true)}
+      ${tile(c.ads, 'Ad costs', 'Which ads pay for themselves', 'Upload a cost report', true)}</div>`;
+    $$('#sources-panel [data-setup]').forEach((el) => el.addEventListener('click', () => { showSettings(); (c.website ? $('#data-panel') : $('#snippet')).scrollIntoView({ behavior: 'smooth' }); }));
+  }
+
+  $('#ask-form').addEventListener('submit', (e) => { e.preventDefault(); askQ($('#ask-input').value); });
+  async function askQ(question) {
+    question = String(question || '').trim();
+    if (!question || !state.site) return;
+    $('#ask-input').value = '';
+    const turn = { q: question, pending: true };
+    state.turns.unshift(turn);
+    renderThread();
+    window.scrollTo({ top: $('#thread').offsetTop - 80, behavior: 'smooth' });
+    try {
+      const r = await post(`/api/sites/${state.site.id}/ask`, { question, tz: tz(), context: state.askContext, history: state.history.slice(-3) });
+      Object.assign(turn, r, { pending: false });
+      if (r.spec) state.askContext = r.spec;
+      state.history.push({ q: question, a: r.answer });
+    } catch (err) { Object.assign(turn, { pending: false, answer: err.message === 'login' ? '' : `Sorry, something went wrong: ${err.message}`, error: true }); }
+    renderThread();
+  }
+  function renderThread() {
+    $('#thread').innerHTML = state.turns.slice(0, 12).map((t, i) => `<div class="turn ${t.pending ? 'fresh' : ''}">
+      <div class="q">${esc(t.q)}</div>
+      <div class="a panel">${t.pending ? '<div class="thinking"><i></i><i></i><i></i> <span class="muted">Looking at your numbers…</span></div>' : `
+        <p class="a-text">${esc(t.answer)}</p>
+        ${t.highlights?.length ? `<div class="hl">${t.highlights.map((h) => `<div class="h ${h.tone || ''}"><div class="hv">${esc(h.value)}</div><div class="hk">${esc(h.label)}${h.sub ? ` <b>${esc(h.sub)}</b>` : ''}</div></div>`).join('')}</div>` : ''}
+        ${t.evidence ? evidence(t.evidence, i) : ''}
+        ${t.drivers?.length ? `<div class="drivers">${t.drivers.map((d) => `<div class="drv"><span class="muted small">${esc(d.dim)}</span> <b>${esc(d.label)}</b> <span class="${d.delta > 0 ? 'up' : 'down'}">${d.delta > 0 ? '+' : '−'}${num(Math.abs(Math.round(d.delta * 100) / 100))}</span> <span class="muted small">(${num(d.before)} → ${num(d.now)})</span></div>`).join('')}</div>` : ''}
+        ${t.nextSteps?.length && t.intent !== 'overview' ? `<ol class="steps compact">${t.nextSteps.slice(0, 4).map((r) => `<li class="step ${r.tone || ''}"><div class="st">${esc(r.title)}</div><div class="sw">${esc(r.why)}</div>${r.action ? `<div class="sa">→ ${esc(r.action)}</div>` : ''}</li>`).join('')}</ol>` : ''}
+        ${t.setup && state.canManage ? '<button class="btn small-btn" data-setup="1">Connect it now</button>' : ''}
+        ${t.followUps?.length ? `<div class="fu">${t.followUps.map((f) => `<button class="chip ghosty" data-q="${esc(f)}">${esc(f)}</button>`).join('')}</div>` : ''}
+        ${t.error ? '' : `<div class="a-meta">${t.ai ? '✦ Written by AI from your numbers' : 'Answered from your numbers'}</div>`}`}
+      </div></div>`).join('');
+    $$('#thread [data-q]').forEach((el) => el.addEventListener('click', () => askQ(el.dataset.q)));
+    $$('#thread [data-setup]').forEach((el) => el.addEventListener('click', () => { showSettings(); $('#data-panel').scrollIntoView({ behavior: 'smooth' }); }));
+  }
+  function evidence(ev, i) {
+    const rows = ev.rows.filter((r) => r.value != null);
+    if (!rows.length) return '';
+    if (ev.series && rows.length > 2) {
+      const W = 640, H = 150, L = 6, R = 6, T = 12, B = 22;
+      const max = Math.max(...rows.map((r) => r.value), 1), min = Math.min(0, ...rows.map((r) => r.value));
+      const x = (j) => L + (j / (rows.length - 1)) * (W - L - R), y = (v) => T + (1 - (v - min) / (max - min || 1)) * (H - T - B);
+      const line = rows.map((r, j) => `${j ? 'L' : 'M'}${x(j).toFixed(1)},${y(r.value).toFixed(1)}`).join(' ');
+      const peak = rows.reduce((a, r, j) => (r.value > rows[a].value ? j : a), 0);
+      return `<figure class="ev"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(ev.metricLabel)} by ${esc(ev.byLabel)}">
+          <defs><linearGradient id="eg${i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".25"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+          <path d="${line} L${x(rows.length - 1)},${H - B} L${x(0)},${H - B} Z" fill="url(#eg${i})"/>
+          <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+          <circle cx="${x(peak)}" cy="${y(rows[peak].value)}" r="3.5" fill="var(--accent)" vector-effect="non-scaling-stroke"/></svg>
+        <figcaption><span>${esc(rows[0].label)}</span><span>Peak ${esc(rows[peak].display)} · ${esc(rows[peak].label)}</span><span>${esc(rows.at(-1).label)}</span></figcaption></figure>`;
+    }
+    const max = Math.max(...rows.map((r) => Math.abs(r.value)), 1e-9);
+    return `<div class="ev bars">${rows.slice(0, 8).map((r) => {
+      const d = r.previous != null && r.previous !== undefined && typeof r.value === 'number' ? r.value - r.previous : null;
+      return `<div class="bar"><span class="fill" style="width:${Math.max(1, (Math.abs(r.value) / max) * 100)}%"></span><span class="k">${esc(r.label)}</span>
+        <span class="v">${esc(r.display)}${d != null && r.previous ? ` <small class="${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${d > 0 ? '↑' : d < 0 ? '↓' : ''}${d ? Math.abs(Math.round((d / Math.abs(r.previous)) * 100)) + '%' : ''}</small>` : ''}</span></div>`;
+    }).join('')}</div>`;
+  }
+
+  // ------------------------------------------------------------ connected sales and ads (settings)
+  const CURRENCIES = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'CHF', 'JPY', 'INR', 'BRL', 'MXN', 'ZAR', 'NGN', 'KES', 'GHS', 'XOF', 'XAF', 'MAD', 'SEK', 'NOK', 'DKK', 'PLN', 'SGD', 'NZD', 'AED'];
+  $('#data-currency').innerHTML = CURRENCIES.map((c) => `<option>${c}</option>`).join('');
+  async function loadData() {
+    const d = await api(`/api/sites/${state.site.id}/data`);
+    $('#hook-url').value = d.webhook;
+    if (!CURRENCIES.includes(d.currency)) $('#data-currency').insertAdjacentHTML('beforeend', `<option>${esc(d.currency)}</option>`);
+    $('#data-currency').value = d.currency;
+    const money = (v) => { try { return new Intl.NumberFormat([], { style: 'currency', currency: d.currency, maximumFractionDigits: 0 }).format(v); } catch { return `${d.currency} ${num(Math.round(v))}`; } };
+    $('#data-summary').innerHTML = `<div class="ds ${d.sales.orders ? 'on' : ''}"><b>${d.sales.orders ? '✓' : '○'} Sales</b> ${d.sales.orders ? `${num(d.sales.orders)} orders, ${money(d.sales.revenue)} since ${day(d.sales.first)} · 
+        ${[d.sales.viaTracker && `${num(d.sales.viaTracker)} from your site`, d.sales.viaWebhook && `${num(d.sales.viaWebhook)} from your shop`, d.sales.viaCsv && `${num(d.sales.viaCsv)} uploaded`].filter(Boolean).join(' · ')}
+        <button class="link small danger-text" data-clear="sales">Remove all</button>` : '<span class="muted">not connected yet</span>'}</div>
+      <div class="ds ${d.ads.length ? 'on' : ''}"><b>${d.ads.length ? '✓' : '○'} Ad costs</b> ${d.ads.length ? d.ads.map((a) => `${esc(a.channel)} ${money(a.spend)} (${esc(a.first)} to ${esc(a.last)})`).join(' · ') + ' <button class="link small danger-text" data-clear="ads">Remove all</button>' : '<span class="muted">none yet</span>'}</div>`;
+    $$('#data-summary [data-clear]').forEach((b) => (b.onclick = async () => {
+      if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again to remove'; return; }
+      await api(`/api/sites/${state.site.id}/data/${b.dataset.clear}`, { method: 'DELETE' }); loadData();
+    }));
+  }
+  const DATA_HINTS = { sales: 'An orders export with a date and an amount (Shopify, WooCommerce, Stripe payments, or your own spreadsheet). A source or utm_source column lets me match sales to channels.', ads: 'A report by day with cost and campaign columns. Google Ads: Campaigns → Download, segmented by Day. Meta: Ads Manager → Reports → Export, broken down by Day.' };
+  const setKind = () => { const k = $('#data-kind').value; $('#data-channel').classList.toggle('hidden', k !== 'ads'); $('#data-hint').textContent = DATA_HINTS[k]; };
+  $('#data-kind').addEventListener('change', setKind); setKind();
+  $('#data-file').addEventListener('change', async (e) => {
+    const msgs = [];
+    for (const f of [...e.target.files]) {
+      try {
+        const r = await post(`/api/sites/${state.site.id}/data`, { kind: $('#data-kind').value, channel: $('#data-channel').value, filename: f.name, csv: await f.text() });
+        msgs.push(r.kind === 'ads' ? `✓ ${f.name}: ${r.rows} days of ${r.channels.join(', ')} costs (${r.from} to ${r.to})` : `✓ ${f.name}: ${r.rows} orders (${r.from} to ${r.to})`);
+      } catch (err) { msgs.push(`✕ ${f.name}: ${err.message}`); }
+    }
+    e.target.value = '';
+    $('#data-msg').innerHTML = msgs.map(esc).join('<br>');
+    loadData();
+  });
+  $('#data-currency').addEventListener('change', async (e) => { try { await post(`/api/sites/${state.site.id}/data`, { currency: e.target.value }, 'PUT'); state.site.currency = e.target.value; loadData(); } catch (err) { $('#data-msg').textContent = err.message; } });
+  $('#hook-copy').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#hook-url').value); $('#hook-copy').textContent = 'Copied ✓'; } catch { $('#hook-url').select(); } setTimeout(() => { $('#hook-copy').textContent = 'Copy'; }, 2000); });
+  $('#hook-rotate').addEventListener('click', async () => {
+    const b = $('#hook-rotate');
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = 'Click again: anything using the old address will stop sending'; return; }
+    b.dataset.armed = ''; b.textContent = 'Make a new address (the old one stops working)';
+    $('#hook-url').value = (await post(`/api/sites/${state.site.id}/data/key`)).webhook;
+  });
+
   // ------------------------------------------------------------ sites
   async function showSites() {
     view('sites');
@@ -460,7 +626,7 @@
     $('#report-msg').textContent = state.config.email ? '' : 'Email sending is not set up on this server yet (RESEND_API_KEY). You can still preview the report.';
     $('#import-msg').textContent = '';
     renderShare();
-    if (state.canManage) loadImports();
+    if (state.canManage) { loadImports(); loadData(); }
   }
   function renderShare() {
     const t = state.site.share_token;
